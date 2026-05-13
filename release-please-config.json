@@ -6,10 +6,7 @@
       "package-name": "idempotency-kit",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
-        {
-          "type": "generic",
-          "path": "idempotency_kit/__version__.py"
-        }
+        "idempotency_kit/__version__.py"
       ]
     }
   }
