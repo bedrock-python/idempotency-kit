@@ -26,8 +26,8 @@ pip install idempotency-kit
 # With Redis support (recommended)
 pip install idempotency-kit[redis]
 
-# With Dishka DI + Settings
-pip install idempotency-kit[dishka,redis,settings]
+# With Dishka DI
+pip install idempotency-kit[dishka,redis]
 ```
 
 **Requirements:** Python 3.11+, Redis 6+

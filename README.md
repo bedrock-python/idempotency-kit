@@ -30,8 +30,8 @@ pip install idempotency-kit
 # With Redis support
 pip install idempotency-kit[redis]
 
-# With Dishka DI + Settings support
-pip install idempotency-kit[dishka,redis,settings]
+# With Dishka DI support
+pip install idempotency-kit[dishka,redis]
 
 # With Prometheus metrics
 pip install idempotency-kit[redis,prometheus]
