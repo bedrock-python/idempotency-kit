@@ -2,223 +2,141 @@
 
 Production-ready idempotency library for async Python applications.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![PyPI](https://img.shields.io/pypi/v/idempotency-kit?color=blue)](https://pypi.org/project/idempotency-kit/)
+[![Python](https://img.shields.io/pypi/pyversions/idempotency-kit)](https://pypi.org/project/idempotency-kit/)
+[![License](https://img.shields.io/github/license/bedrock-python/idempotency-kit)](LICENSE)
+[![CI](https://github.com/bedrock-python/idempotency-kit/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/bedrock-python/idempotency-kit/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/bedrock-python/idempotency-kit/graph/badge.svg)](https://codecov.io/gh/bedrock-python/idempotency-kit)
+[![Docs](https://img.shields.io/badge/docs-online-blue)](https://bedrock-python.github.io/idempotency-kit/)
+
+Ensure operations execute exactly once, even when called multiple times with the same idempotency key. Built for production microservices with graceful degradation, collision handling, and observability.
 
 ## Features
 
-- 🏗️ **Clean Architecture** - Core domain separated from infrastructure
-- 🔌 **Protocol-Based** - Easy to add new storage backends (Redis, Postgres, etc.)
-- ✅ **Type-Safe** - Full type hints with Pydantic validation
-- ⚡ **Async First** - Built for modern asyncio applications
-- 🛡️ **Production-Ready** - Graceful degradation, error handling, TTL management
-- 📊 **Observability** - Built-in metrics (hits, misses, collisions, latency)
-- 📦 **Bulk Operations** - Efficient `get_many`, `save_many`, `delete_many`
-- 🔗 **Redis Cluster Compatible** - Non-transactional pipelines for distributed environments
-
-## Requirements
-
-- **Python**: 3.11+
-- **Redis**: 6+ (for Redis backend)
+- **Clean Architecture** — core domain separated from infrastructure
+- **Protocol-Based** — easy to swap storage backends (Redis, custom)
+- **Type-Safe** — full type hints with Pydantic validation
+- **Async First** — built for asyncio applications
+- **Graceful Degradation** — high availability over strict exactly-once
+- **Collision Handling** — automatic resolution of concurrent requests
+- **Observability** — built-in metrics (hits, misses, collisions, latency)
+- **Bulk Operations** — efficient `get_many`, `save_many`, `delete_many`
+- **Redis Cluster Compatible** — non-transactional pipelines
+- **Decorator Pattern** — `@async_idempotent` for zero-boilerplate integration
 
 ## Installation
 
 ```bash
-# Core only (Pydantic models and protocols)
 pip install idempotency-kit
 
-# With Redis support
+# With Redis support (recommended)
 pip install idempotency-kit[redis]
 
-# With Dishka DI support
+# With Dishka DI
 pip install idempotency-kit[dishka,redis]
-
-# With Prometheus metrics
-pip install idempotency-kit[redis,prometheus]
 ```
 
-## Quick Start
+**Requirements:** Python 3.11+, Redis 6+
+
+## Quick start
 
 ```python
-from redis.asyncio import Redis
-from idempotency_kit import IdempotencyDomainService, IdempotencyError, IdempotencyKeyCollisionError
-from idempotency_kit.infra.storage.redis.aio import RedisAsyncIdempotencyRepository
+from idempotency_kit import AsyncIdempotencyCoordinator, PydanticResultAdapter, async_idempotent
 
-# 1. Initialize
-redis = Redis.from_url("redis://localhost:6379")
-repo = RedisAsyncIdempotencyRepository(redis)
-service = IdempotencyDomainService()
+class CreateOrderUseCase:
+    def __init__(self, uow: AsyncUnitOfWork, coordinator: AsyncIdempotencyCoordinator):
+        self._uow = uow
+        self.coordinator = coordinator
 
-# 2. Use in your use case
-class CreateUserUseCase:
-    async def execute(self, dto: CreateUserDTO, idempotency_key: str | None = None) -> UserDTO:
-        operation = "user.create"
-
-        # Check cache (graceful degradation on failure)
-        if idempotency_key:
-            try:
-                cached = await repo.get(operation, idempotency_key)
-                if cached:
-                    return UserDTO(**cached.result)
-            except IdempotencyError:
-                pass  # Log and proceed
-
-        # Execute business logic
-        user = await self._create_user(dto)
-        result = UserDTO.from_entity(user)
-
-        # Save to cache
-        if idempotency_key:
-            record = service.create_record(
-                operation=operation,
-                idempotency_key=idempotency_key,
-                result=result.model_dump(mode="json"),
-            )
-            try:
-                await repo.save(record)
-            except IdempotencyKeyCollisionError:
-                # Concurrent request finished first - use its result
-                cached = await repo.get(operation, idempotency_key)
-                if cached:
-                    return UserDTO(**cached.result)
-            except IdempotencyError:
-                pass  # Log and continue
-
-        return result
+    @async_idempotent(
+        operation="order.create",
+        adapter=PydanticResultAdapter(OrderDTO),
+    )
+    async def execute(
+        self,
+        dto: CreateOrderDTO,
+        idempotency_key: str | None = None,
+    ) -> OrderDTO:
+        """Create order - idempotency handled automatically."""
+        async with self._uow.transaction() as tx:
+            # Your business logic - no idempotency code needed!
+            order = await tx.orders.create(dto.items, dto.total)
+            await tx.outbox.create(OrderCreatedEvent(order_id=order.id))
+            
+            return OrderDTO.from_entity(order)
 ```
+
+Pass `idempotency_key` to downstream services for distributed idempotency:
+
+```python
+# Orchestrate multiple services with same key
+await identity_service.create_user(..., idempotency_key=idempotency_key)
+await payment_service.charge(..., idempotency_key=idempotency_key)
+```
+
+## How it works
+
+### 1. Client provides key
+
+```
+POST /api/orders
+Idempotency-Key: abc-123-def
+```
+
+### 2. Server checks cache
+
+```python
+cached = await repo.get("order.create", "abc-123-def")
+if cached:
+    return cached.result  # Return immediately ✅
+```
+
+### 3. Server executes (if not cached)
+
+```python
+order = await create_order(dto)
+await repo.save(record)  # Cache result for future requests
+return order
+```
+
+### 4. Concurrent requests handled
+
+If two requests arrive simultaneously:
+
+- First request: cache miss → execute → save ✅
+- Second request: collision on save → fetch first result → return ✅
+
+Both requests get the **same result** - idempotency guaranteed!
+
+## Use cases
+
+- **HTTP APIs** — ensure POST/PUT requests are idempotent
+- **Background Jobs** — prevent duplicate processing on retries
+- **Event Consumers** — handle duplicate events gracefully
+- **Message Queues** — at-most-once message processing
 
 ## Documentation
 
-📚 **[Full Documentation](docs/)**
+📚 **[Full Documentation](https://bedrock-python.github.io/idempotency-kit/)**
 
-| Guide | Description |
-|-------|-------------|
-| **[Quick Start](docs/quickstart.md)** | Get started in 5 minutes |
-| **[User Guide](docs/user_guide.md)** | Detailed usage examples and best practices |
-| **[Architecture](docs/architecture.md)** | Design principles and request flows |
-| **[API Reference](docs/api_reference.md)** | Complete API documentation |
-| **[Testing](docs/testing_conventions.md)** | Testing guidelines and patterns |
+- [Quick Start](https://bedrock-python.github.io/idempotency-kit/quickstart/) — get started in 5 minutes
+- [User Guide](https://bedrock-python.github.io/idempotency-kit/user_guide/) — detailed usage and patterns
+- [Architecture](https://bedrock-python.github.io/idempotency-kit/architecture/) — design principles
+- [API Reference](https://bedrock-python.github.io/idempotency-kit/api_reference/) — complete API docs
 
-## Key Concepts
+## Development
 
-### Idempotency Pattern
-
-1. Client provides unique `idempotency_key` for an operation
-2. Server checks if result exists in cache
-3. **If found** → return cached result (idempotent ✅)
-4. **If not found** → execute, cache result, return it
-
-### Error Handling
-
-| Exception | Meaning | Action |
-|-----------|---------|--------|
-| `IdempotencyKeyCollisionError` | Duplicate key (concurrent/retry) | Return winner's result |
-| `IdempotencyStorageError` | Redis unavailable | Graceful degradation |
-| `IdempotencyValidationError` | Invalid input | Return 400 Bad Request |
-| `IdempotencyRecordExpiredError` | Record expired | Re-execute operation |
-
-### Graceful Degradation
-
-If Redis is unavailable:
-- ✅ Operation succeeds (high availability)
-- ⚠️ Result not cached (at-least-once delivery)
-- 📝 Error logged for monitoring
-
-This ensures **high availability** over strict exactly-once semantics.
-
-## Advanced Features
-
-### Bulk Operations
-
-```python
-# Save multiple records (atomic with rollback)
-records = [
-    service.create_record("op", "key1", {"v": 1}),
-    service.create_record("op", "key2", {"v": 2}),
-]
-await repo.save_many(records, rollback_on_error=True)
-
-# Retrieve multiple
-results = await repo.get_many("op", ["key1", "key2"])  # dict[str, IdempotencyRecord]
-
-# Delete multiple
-deleted_count = await repo.delete_many("op", ["key1", "key2"])
+```bash
+make install          # uv sync --group dev
+make check            # ruff + mypy
+make test-unit        # unit tests (no Docker)
+make test-integration # integration tests (Docker required)
+make test             # all tests with coverage
+make docs-serve       # local docs preview
 ```
 
-### Custom TTL
-
-```python
-# Default TTL: 30 minutes
-record = service.create_record("op", "key", result)
-
-# Custom TTL: 24 hours
-record = service.create_record("op", "key", result, ttl_minutes=1440)
-
-# Per-operation TTL via settings
-settings = BaseIdempotencySettings(
-    default_ttl_minutes=30,
-    operation_ttls={"user.create": 60, "order.process": 1440}
-)
-```
-
-### Metrics
-
-```python
-from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol
-
-class PrometheusMetrics(IdempotencyMetricsProtocol):
-    def record_hit(self, operation: str) -> None:
-        CACHE_HITS.labels(operation=operation).inc()
-    
-    def record_collision(self, operation: str) -> None:
-        COLLISIONS.labels(operation=operation).inc()
-    
-    # ... implement other methods
-
-repo = RedisAsyncIdempotencyRepository(redis, metrics=PrometheusMetrics())
-```
-
-## Dependency Injection (Dishka)
-
-```python
-from dishka import make_async_container, Provider, Scope, provide
-from redis.asyncio import Redis
-from idempotency_kit.settings import BaseIdempotencySettings
-from idempotency_kit.dishka.common import IdempotencyProvider
-from idempotency_kit.dishka.aio import AsyncRedisIdempotencyProvider
-
-settings = BaseIdempotencySettings(
-    key_prefix="idempotency:",
-    default_ttl_minutes=60,
-    operation_ttls={"user.create": 3600},
-)
-
-class RedisProvider(Provider):
-    @provide(scope=Scope.APP)
-    async def get_redis(self) -> Redis:
-        return Redis.from_url("redis://localhost:6379")
-
-container = make_async_container(
-    RedisProvider(),
-    IdempotencyProvider(),
-    AsyncRedisIdempotencyProvider(),
-)
-```
-
-See [User Guide](docs/user_guide.md) for complete Dishka integration examples.
-
-## Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development setup
-- Code style guidelines
-- Testing conventions
-- Pull request process
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 ## License
 
-[Apache 2.0](LICENSE) - see LICENSE file for details.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for version history and migration guides.
+[Apache 2.0](LICENSE)
