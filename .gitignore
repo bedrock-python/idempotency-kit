@@ -125,3 +125,6 @@ dmypy.json
 
 # ruff
 .ruff_cache/
+
+# Claude Code worktrees
+.claude/worktrees/
