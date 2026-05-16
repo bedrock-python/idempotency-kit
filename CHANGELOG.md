@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.0...idempotency-kit-v0.1.1) (2026-05-16)
+
+
+### Bug Fixes
+
+* **release:** update version to 0.1.0 and fix release-please config ([016c6c4](https://github.com/bedrock-python/idempotency-kit/commit/016c6c42ba189291be56250192f9e6db7020f853))
+* update publish workflow, release-please version search, gitignore ([#3](https://github.com/bedrock-python/idempotency-kit/issues/3)) ([9915f0e](https://github.com/bedrock-python/idempotency-kit/commit/9915f0e6e784b6d59375541e6244efaca694a0bb))
+
 ## 0.1.0 (2026-05-13)
 
 
