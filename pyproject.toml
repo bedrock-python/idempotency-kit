@@ -50,6 +50,8 @@ test = [
     "fakeredis>=2.28.2",
     "redis>=5.0.0",
     "orjson>=3.11.7,<4.0.0",
+    "dishka>=1.0.0",
+    "prometheus-client>=0.15.0",
 ]
 docs = [
     "zensical>=0.0.37",

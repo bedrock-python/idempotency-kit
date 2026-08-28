@@ -23,7 +23,7 @@ class AsyncIdempotencyCoordinatorProvider(Provider):
         repository: AsyncIdempotencyRepository,
         domain_service: IdempotencyDomainService,
         settings: IdempotencySettingsProtocol,
-        metrics: IdempotencyMetricsProtocol | None = None,
+        metrics: IdempotencyMetricsProtocol,
     ) -> AsyncIdempotencyCoordinator:
         """Provide idempotency coordinator."""
         return AsyncIdempotencyCoordinator(

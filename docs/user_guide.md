@@ -528,23 +528,29 @@ class UseCaseProvider(Provider):
         )
 ```
 
-The coordinator itself is provided by `dishka-providers`:
+The coordinator itself is provided by the providers shipped in `idempotency_kit.dishka`:
 
 ```python
 # infra/di/containers/api.py
 from dishka import make_async_container
-from dishka_providers.idempotency.aio.coordinator import AsyncIdempotencyCoordinatorProvider
-from dishka_providers.idempotency.aio.redis import AsyncRedisIdempotencyProvider
+from idempotency_kit.dishka import (
+    AsyncIdempotencyCoordinatorProvider,
+    AsyncRedisIdempotencyProvider,
+    IdempotencyProvider,
+)
 
 def create_api_container(settings: Settings) -> AsyncContainer:
     return make_async_container(
         DatabaseProvider(),
         RedisProvider(),
+        IdempotencyProvider(),  # Provides domain service and metrics collector
         AsyncRedisIdempotencyProvider(),  # Provides repository
         AsyncIdempotencyCoordinatorProvider(),  # Provides coordinator
         UseCaseProvider(),
     )
 ```
+
+Your own providers supply the `Redis` client and the settings object; the settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. To use another metrics backend, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
 
 ## Migration Guide
 
