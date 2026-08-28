@@ -57,5 +57,15 @@ jobs:
           ref: ${{ needs.check.outputs.tag }}
 
       - uses: astral-sh/setup-uv@v7
+      # Release Please bumps __version__.py through its x-release-please-version
+      # annotation; rewriting it from the tag is a safety net so a tag can never
+      # publish a stale version.
+      - name: Set version from release tag
+        run: |
+          VERSION="${{ needs.check.outputs.tag }}"
+          VERSION="${VERSION#idempotency-kit-v}"
+          echo "__version__ = \"$VERSION\"  # x-release-please-version" > idempotency_kit/__version__.py
+          cat idempotency_kit/__version__.py
+
       - run: uv build
       - run: uv publish
