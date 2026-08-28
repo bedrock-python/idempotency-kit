@@ -97,3 +97,16 @@ def test__idempotency_record_create__colon_in_field__raises_validation_error(fie
     # Act & Assert
     with pytest.raises(ValidationError, match="cannot contain ':'"):
         IdempotencyRecord.create(**params)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [None, [], [1, "two", None], "plain", 0, {"nested": {"list": [1, 2]}}],
+    ids=["null", "empty-list", "list", "string", "int", "nested-mapping"],
+)
+def test__idempotency_record__any_json_result__is_accepted(result: object) -> None:
+    # Act
+    record = IdempotencyRecord.create(operation="op", idempotency_key="key", result=result, ttl_seconds=60)
+
+    # Assert
+    assert record.result == result

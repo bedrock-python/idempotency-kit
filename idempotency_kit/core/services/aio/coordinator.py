@@ -1,9 +1,14 @@
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar
 
-from idempotency_kit.core.exceptions import IdempotencyKeyCollisionError
+from idempotency_kit.core.exceptions import (
+    IdempotencyInvalidTTLError,
+    IdempotencyKeyCollisionError,
+    IdempotencyValidationError,
+)
 from idempotency_kit.core.protocols.adapter import ResultAdapter
 from idempotency_kit.core.protocols.aio.repository import AsyncIdempotencyRepository
 from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol, NoOpIdempotencyMetrics
@@ -12,6 +17,18 @@ from idempotency_kit.core.services.domain import IdempotencyDomainService
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Hit(Generic[T]):
+    """A decoded cached result.
+
+    Wrapping it keeps hit/miss a property of the *record*: an adapter may
+    legitimately decode to ``None`` (``VoidResultAdapter``, a stored JSON
+    ``null``), which a bare ``None`` sentinel would misread as a miss.
+    """
+
+    value: T
 
 
 class AsyncIdempotencyCoordinator:
@@ -45,9 +62,9 @@ class AsyncIdempotencyCoordinator:
             return await action(*args, **kwargs)
 
         # 1. Try to get from storage
-        cached_result = await self._try_get_cached(operation, idempotency_key, adapter)
-        if cached_result is not None:
-            return cached_result
+        hit = await self._try_get_cached(operation, idempotency_key, adapter)
+        if hit is not None:
+            return hit.value
 
         # 2. Execute business logic
         result = await action(*args, **kwargs)
@@ -68,18 +85,18 @@ class AsyncIdempotencyCoordinator:
         operation: str,
         idempotency_key: str,
         adapter: ResultAdapter[T],
-    ) -> T | None:
+    ) -> _Hit[T] | None:
         """Try to fetch and decode result from storage. Returns None on miss or error."""
         start_time = time.perf_counter()
         try:
-            result = await self._get_and_decode(operation, idempotency_key, adapter)
-            if result is not None:
+            hit = await self._get_and_decode(operation, idempotency_key, adapter)
+            if hit is not None:
                 self._metrics.record_hit(operation)
                 logger.info(
                     "Idempotency cache hit",
                     extra={"operation": operation, "idempotency_key": idempotency_key},
                 )
-                return result
+                return hit
             self._metrics.record_miss(operation)
         except Exception:
             self._metrics.record_error(operation, "storage_get_error")
@@ -109,6 +126,22 @@ class AsyncIdempotencyCoordinator:
             )
         except IdempotencyKeyCollisionError:
             return await self._handle_collision(operation, idempotency_key, result, adapter)
+        except (IdempotencyValidationError, IdempotencyInvalidTTLError):
+            # The record itself is invalid — the adapter encoded something the
+            # storage format cannot hold, or the TTL is out of range. No retry can
+            # fix that, so it is reported as a contract violation rather than a
+            # storage blip. The result is still returned: the action has already
+            # run, and raising here would make the caller retry a completed
+            # operation — the one thing an idempotency layer must never cause.
+            self._metrics.record_error(operation, "record_validation_error")
+            logger.exception(
+                "Idempotency record rejected; this operation will not be cached",
+                extra={
+                    "operation": operation,
+                    "idempotency_key": idempotency_key,
+                    "adapter": type(adapter).__name__,
+                },
+            )
         except Exception:
             self._metrics.record_error(operation, "storage_save_error")
             logger.exception(
@@ -125,10 +158,10 @@ class AsyncIdempotencyCoordinator:
         operation: str,
         idempotency_key: str,
         adapter: ResultAdapter[T],
-    ) -> T | None:
-        """Fetch record from repository and decode it safely."""
+    ) -> _Hit[T] | None:
+        """Fetch record from repository and decode it safely; ``None`` means no usable record."""
         cached = await self._repo.get(operation, idempotency_key)
-        if not cached:
+        if cached is None:
             return None
         return self._decode_safely(adapter, cached.result, operation, idempotency_key)
 
@@ -163,9 +196,9 @@ class AsyncIdempotencyCoordinator:
             extra={"operation": operation, "idempotency_key": idempotency_key},
         )
         try:
-            winner_result = await self._get_and_decode(operation, idempotency_key, adapter)
-            if winner_result is not None:
-                return winner_result
+            winner = await self._get_and_decode(operation, idempotency_key, adapter)
+            if winner is not None:
+                return winner.value
         except Exception:
             logger.exception(
                 "Failed to fetch concurrent result after collision",
@@ -179,10 +212,10 @@ class AsyncIdempotencyCoordinator:
         data: Any,
         operation: str,
         idempotency_key: str,
-    ) -> T | None:
+    ) -> _Hit[T] | None:
         """Try to decode data using adapter. Returns None and logs error on failure."""
         try:
-            return adapter.decode(data)
+            return _Hit(adapter.decode(data))
         except Exception:
             logger.exception(
                 "Idempotency decode error",

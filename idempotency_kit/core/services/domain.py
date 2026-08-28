@@ -52,7 +52,7 @@ class IdempotencyDomainService:
         self,
         operation: str,
         idempotency_key: str,
-        result: dict[str, JsonValue],
+        result: JsonValue,
         *,
         ttl_minutes: int | None = None,
     ) -> IdempotencyRecord:

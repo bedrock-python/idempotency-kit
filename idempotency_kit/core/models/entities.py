@@ -1,6 +1,5 @@
 """Idempotency record entity."""
 
-from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Self
 
@@ -39,8 +38,8 @@ class IdempotencyRecord(IdempotencyIdentifiers):
 
     model_config = ConfigDict(frozen=True)
 
-    # Result
-    result: Mapping[str, JsonValue] = Field(description="Cached operation result (JSON-serializable)")
+    # Result: whatever the adapter encoded — any JSON value, ``null`` for a void result.
+    result: JsonValue = Field(description="Cached operation result (any JSON value; null for void results)")
 
     # Timing
     created_at: datetime = Field(description="When this record was created")
@@ -51,7 +50,7 @@ class IdempotencyRecord(IdempotencyIdentifiers):
         cls,
         operation: str,
         idempotency_key: str,
-        result: Mapping[str, JsonValue],
+        result: JsonValue,
         ttl_seconds: float,
     ) -> Self:
         """Create a new record with calculated expiration."""
