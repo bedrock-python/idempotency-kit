@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.1](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.0...idempotency-kit-v0.1.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **core:** store any JSON result and decide hit/miss on the record, not on None ([#8](https://github.com/bedrock-python/idempotency-kit/issues/8)) ([ddb537e](https://github.com/bedrock-python/idempotency-kit/commit/ddb537e8c39e5becb1a9b1ff7549bc11f40735d7)), closes [#6](https://github.com/bedrock-python/idempotency-kit/issues/6)
+* **dishka:** provide the metrics collector from settings so the shipped providers build a container ([#9](https://github.com/bedrock-python/idempotency-kit/issues/9)) ([2a06416](https://github.com/bedrock-python/idempotency-kit/commit/2a064169a16332762d3ab62926c03d2f203482bd)), closes [#7](https://github.com/bedrock-python/idempotency-kit/issues/7)
+* **release:** update version to 0.1.0 and fix release-please config ([016c6c4](https://github.com/bedrock-python/idempotency-kit/commit/016c6c42ba189291be56250192f9e6db7020f853))
+* update publish workflow, release-please version search, gitignore ([#3](https://github.com/bedrock-python/idempotency-kit/issues/3)) ([9915f0e](https://github.com/bedrock-python/idempotency-kit/commit/9915f0e6e784b6d59375541e6244efaca694a0bb))
+
 ## 0.1.0 (2026-05-13)
 
 
