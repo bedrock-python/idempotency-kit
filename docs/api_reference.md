@@ -17,11 +17,11 @@ A frozen Pydantic model representing an idempotency result. Inherits from `Idemp
 - **Attributes**:
   - `operation` (str): Name of the operation.
   - `idempotency_key` (str): Unique key for this instance.
-  - `result` (Mapping): The cached result as a JSON-serializable mapping.
+  - `result` (JsonValue): The cached result — any JSON value (mapping, list, scalar); `null` for a void result.
   - `created_at` (datetime): When the record was created.
   - `expires_at` (datetime): When the record will expire.
 - **Methods**:
-  - `create(operation: str, idempotency_key: str, result: Mapping[str, JsonValue], ttl_seconds: float) -> IdempotencyRecord`: Class method to create a new record.
+  - `create(operation: str, idempotency_key: str, result: JsonValue, ttl_seconds: float) -> IdempotencyRecord`: Class method to create a new record.
   - `is_expired`: Property returning `True` if current time is after `expires_at`.
   - `ttl_seconds`: Property returning remaining TTL in seconds.
 

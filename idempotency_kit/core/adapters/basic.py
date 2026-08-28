@@ -24,7 +24,7 @@ class PydanticResultAdapter(ResultAdapter[T]):
 
 
 class JsonResultAdapter(ResultAdapter[Any]):
-    """Adapter for JSON-serializable types (dict, list, etc.)."""
+    """Adapter for results that already are JSON values (dict, list, str, number, bool or ``None``)."""
 
     def encode(self, value: Any) -> Any:
         return value
@@ -34,7 +34,7 @@ class JsonResultAdapter(ResultAdapter[Any]):
 
 
 class VoidResultAdapter(ResultAdapter[None]):
-    """Adapter for functions that return None."""
+    """Adapter for functions that return ``None``: the record stores JSON ``null`` and decodes back to ``None``."""
 
     def encode(self, value: None) -> Any:
         return None
