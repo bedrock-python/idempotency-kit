@@ -9,8 +9,7 @@
       "extra-files": [
         {
           "type": "generic",
-          "path": "idempotency_kit/__version__.py",
-          "search": "__version__ = \"$1\""
+          "path": "idempotency_kit/__version__.py"
         }
       ]
     }
