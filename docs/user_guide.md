@@ -339,7 +339,7 @@ class CreateUserUseCase:
 
 **Key Points:**
 - `@async_idempotent` decorator handles all idempotency logic
-- `PydanticResultAdapter` serializes/deserializes Pydantic models automatically
+- `PydanticResultAdapter` serializes/deserializes Pydantic models automatically; `JsonResultAdapter` stores any JSON value as is, and `VoidResultAdapter` is for operations that return `None` — the record stores `null` and replays it without re-executing
 - `idempotency_key` parameter is optional - clients can omit it for non-idempotent calls
 - Coordinator is injected via DI (Dishka)
 

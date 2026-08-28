@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from idempotency_kit.core.exceptions import IdempotencyKeyCollisionError
+from idempotency_kit.core.exceptions import IdempotencyKeyCollisionError, IdempotencyValidationError
 from idempotency_kit.core.models.entities import IdempotencyRecord
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
 
@@ -250,3 +250,50 @@ async def test__coordinator__no_key__executes_directly(
     assert result == "ok"
     mock_repo.get.assert_not_called()
     action.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test__coordinator__cached_none_result__is_a_hit_not_a_miss(
+    coordinator: AsyncIdempotencyCoordinator, mock_repo: AsyncMock, mock_adapter: MagicMock
+) -> None:
+    """A stored ``null`` (a void result) must replay, not re-execute the action."""
+    # Arrange
+    record = IdempotencyRecord(
+        operation="op.void",
+        idempotency_key="key",
+        result=None,
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC),
+    )
+    action = AsyncMock(return_value=None)
+    mock_repo.get.return_value = record
+
+    # Act
+    result = await coordinator.coordinate("op.void", "key", 60, mock_adapter, action)
+
+    # Assert
+    assert result is None
+    action.assert_not_called()
+    mock_repo.save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test__coordinator__record_validation_error__returns_result_and_reports_a_contract_violation(
+    mock_repo: AsyncMock, mock_adapter: MagicMock
+) -> None:
+    """An unstorable record is a programming error: reported as such, never turned into a retry."""
+    # Arrange
+    domain_service = MagicMock()
+    domain_service.create_record.side_effect = IdempotencyValidationError("result is not JSON")
+    metrics = MagicMock()
+    coordinator = AsyncIdempotencyCoordinator(repository=mock_repo, domain_service=domain_service, metrics=metrics)
+    mock_repo.get.return_value = None
+    action = AsyncMock(return_value={"data": "ok"})
+
+    # Act
+    result = await coordinator.coordinate("op", "key", 60, mock_adapter, action)
+
+    # Assert
+    assert result == {"data": "ok"}
+    mock_repo.save.assert_not_called()
+    metrics.record_error.assert_called_once_with("op", "record_validation_error")
