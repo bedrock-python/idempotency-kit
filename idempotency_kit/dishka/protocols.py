@@ -14,7 +14,9 @@ class IdempotencySettingsProtocol(Protocol):
 
     @property
     def metrics_enabled(self) -> bool:
-        """Whether idempotency metrics are enabled."""
+        """Whether the shipped providers wire ``PrometheusIdempotencyMetrics``
+        (needs the ``prometheus`` extra); a no-op collector otherwise.
+        """
         ...
 
     @property

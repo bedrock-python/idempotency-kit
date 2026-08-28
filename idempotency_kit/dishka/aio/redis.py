@@ -19,7 +19,7 @@ class AsyncRedisIdempotencyProvider(Provider):
         self,
         redis: AsyncRedisClient,
         settings: IdempotencySettingsProtocol,
-        metrics: IdempotencyMetricsProtocol | None = None,
+        metrics: IdempotencyMetricsProtocol,
     ) -> AsyncIdempotencyRepository:
         """Provide idempotency repository."""
         return RedisAsyncIdempotencyRepository(
