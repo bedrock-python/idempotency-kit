@@ -43,7 +43,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --group dev
       - run: uv run pytest -m integration --cov=idempotency_kit --cov-report=xml --cov-fail-under=50
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
