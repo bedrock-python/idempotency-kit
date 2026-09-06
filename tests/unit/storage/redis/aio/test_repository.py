@@ -10,12 +10,14 @@ import pytest
 from fakeredis import FakeAsyncRedis as AsyncRedisClient
 
 from idempotency_kit import (
+    AsyncIdempotencyCoordinator,
     IdempotencyDomainService,
     IdempotencyError,
     IdempotencyKeyCollisionError,
     IdempotencyRecord,
     IdempotencyStorageError,
     IdempotencyValidationError,
+    JsonResultAdapter,
 )
 from idempotency_kit.core.constants import MAX_KEY_LENGTH, MAX_OPERATION_LENGTH
 from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol
@@ -440,22 +442,18 @@ async def test_metrics_comprehensive(fake_redis: AsyncRedisClient) -> None:
     repo = RedisAsyncIdempotencyRepository(fake_redis, metrics=metrics_mock)
     service = IdempotencyDomainService()
 
-    # record_hit on get
+    # Hit, miss, collision and the latency of get and save belong to the coordinator,
+    # so that a collector shared by both layers counts each operation once.
     record = service.create_record("op", "hit", {"r": 1})
     await repo.save(record)
-    metrics_mock.record_latency.reset_mock()
     await repo.get("op", "hit")
-    metrics_mock.record_hit.assert_called_with("op")
-    metrics_mock.record_latency.assert_called()
-
-    # record_miss on get
     await repo.get("op", "miss")
-    metrics_mock.record_miss.assert_called_with("op")
-
-    # record_collision on save
     with pytest.raises(IdempotencyKeyCollisionError):
         await repo.save(record)
-    metrics_mock.record_collision.assert_called_with("op")
+    metrics_mock.record_hit.assert_not_called()
+    metrics_mock.record_miss.assert_not_called()
+    metrics_mock.record_collision.assert_not_called()
+    metrics_mock.record_latency.assert_not_called()
 
     # record_error on serialization failure
     with (
@@ -482,6 +480,35 @@ async def test_metrics_comprehensive(fake_redis: AsyncRedisClient) -> None:
     await repo.get_many("bulk", ["hit", "miss", "miss2"])
     metrics_mock.record_bulk_hit.assert_called_with("bulk", 1)
     metrics_mock.record_bulk_miss.assert_called_with("bulk", 2)
+
+    # delete and get_many have no coordinator equivalent, so the repository times them
+    await repo.delete("op", "hit")
+    assert [call.args[1] for call in metrics_mock.record_latency.call_args_list] == ["get_many", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_metrics_shared_with_coordinator_count_each_operation_once(fake_redis: AsyncRedisClient) -> None:
+    """One collector wired to both layers -- what the shipped providers do -- must not count twice."""
+    metrics_mock = MagicMock(spec=IdempotencyMetricsProtocol)
+    repo = RedisAsyncIdempotencyRepository(fake_redis, key_prefix="shared:", metrics=metrics_mock)
+    coordinator = AsyncIdempotencyCoordinator(
+        repository=repo,
+        domain_service=IdempotencyDomainService(),
+        metrics=metrics_mock,
+    )
+    adapter: JsonResultAdapter = JsonResultAdapter()
+
+    async def action() -> dict[str, int]:
+        return {"r": 1}
+
+    # Act
+    await coordinator.coordinate("op.shared", "key", 600, adapter, action)
+    await coordinator.coordinate("op.shared", "key", 600, adapter, action)
+
+    # Assert
+    assert metrics_mock.record_miss.call_count == 1
+    assert metrics_mock.record_hit.call_count == 1
+    assert [call.args[1] for call in metrics_mock.record_latency.call_args_list] == ["get", "save", "get"]
 
 
 @pytest.mark.asyncio
