@@ -11,6 +11,15 @@ Production-ready idempotency library for async Python applications.
 
 Ensure operations execute exactly once, even when called multiple times with the same idempotency key. Built for production microservices with graceful degradation, collision handling, and observability.
 
+> [!TIP]
+> **Building this with an AI assistant?** Hand it
+> **[one page](https://bedrock-python.github.io/idempotency-kit/agents/)** instead of the
+> whole site: the complete API surface, the rules that break code when they are broken —
+> what the key actually identifies, what two concurrent callers really do, how a TTL in
+> seconds is rounded — the mistakes models make with this API, and a map of which page to
+> fetch for the rest. Every docs page is also served as raw Markdown at its own URL, and a
+> **Copy page** button at the top of each one hands it straight to a chat window.
+
 ## Features
 
 - **Clean Architecture** — core domain separated from infrastructure
@@ -119,6 +128,7 @@ Both requests get the **same result** - idempotency guaranteed!
 
 📚 **[Full Documentation](https://bedrock-python.github.io/idempotency-kit/)**
 
+- [For AI agents](https://bedrock-python.github.io/idempotency-kit/agents/) — the whole library on one page
 - [Quick Start](https://bedrock-python.github.io/idempotency-kit/quickstart/) — get started in 5 minutes
 - [User Guide](https://bedrock-python.github.io/idempotency-kit/user_guide/) — detailed usage and patterns
 - [Architecture](https://bedrock-python.github.io/idempotency-kit/architecture/) — design principles
