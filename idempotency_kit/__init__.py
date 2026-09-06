@@ -8,6 +8,7 @@ from .core.adapters import (
 from .core.decorators.aio.idempotent import async_idempotent
 from .core.exceptions import (
     IdempotencyError,
+    IdempotencyInProgressError,
     IdempotencyInvalidTTLError,
     IdempotencyKeyCollisionError,
     IdempotencyRecordExpiredError,
@@ -27,6 +28,7 @@ __all__ = [
     "IdempotencyDomainService",
     "IdempotencyError",
     "IdempotencyIdentifiers",
+    "IdempotencyInProgressError",
     "IdempotencyInvalidTTLError",
     "IdempotencyKeyCollisionError",
     "IdempotencyMetricsProtocol",

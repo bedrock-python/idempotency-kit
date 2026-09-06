@@ -177,21 +177,8 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
 
         return record
 
-    async def save(
-        self,
-        record: IdempotencyRecord,
-    ) -> None:
-        """Save record to Redis with NX (set if not exists).
-
-        Args:
-            record: Idempotency record to save
-
-        Raises:
-            IdempotencyKeyCollisionError: If key already exists in Redis
-            IdempotencyValidationError: If record is invalid or already expired
-            IdempotencyStorageError: If Redis operation fails
-            IdempotencyError: If serialization fails
-        """
+    def _prepare_write(self, record: IdempotencyRecord) -> tuple[str, bytes, int]:
+        """Validate and serialize a record for a write; returns the Redis key, the payload and the TTL in seconds."""
         operation = record.operation
         self._validate_inputs(operation, record.idempotency_key)
         key = self._make_key(operation, record.idempotency_key)
@@ -209,7 +196,11 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
 
         # Serialize record
         try:
-            data = orjson.dumps(record.model_dump(mode="json")) if _HAS_ORJSON else record.model_dump_json()
+            data = (
+                orjson.dumps(record.model_dump(mode="json"))
+                if _HAS_ORJSON
+                else record.model_dump_json().encode("utf-8")
+            )
         except Exception as e:
             self._metrics.record_error(operation, "serialization_error")
             logger.exception(
@@ -218,28 +209,74 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
             )
             raise IdempotencyError("Serialization failed") from e
 
-        # Use SET with NX (only if key doesn't exist) and EX (expiration)
+        return key, data, ttl_seconds
+
+    async def _set(
+        self, record: IdempotencyRecord, key: str, data: bytes, ttl_seconds: int, *, nx: bool, method: str
+    ) -> bool:
+        """``SET key data EX ttl_seconds``, with ``NX`` when asked; returns whether the key was written."""
         try:
-            was_set = await self._redis.set(key, data, ex=ttl_seconds, nx=True)
+            was_set = await self._redis.set(key, data, ex=ttl_seconds, nx=nx)
         except Exception as e:
-            self._metrics.record_error(operation, type(e).__name__)
+            self._metrics.record_error(record.operation, type(e).__name__)
             logger.exception(
-                "Redis error during save",
-                extra={"operation": operation, "key": record.idempotency_key},
+                f"Redis error during {method}",
+                extra={"operation": record.operation, "key": record.idempotency_key},
             )
             # In case of Redis error, we cannot guarantee idempotency.
             raise IdempotencyStorageError(
-                "Redis storage failure during save",
-                operation=operation,
+                f"Redis storage failure during {method}",
+                operation=record.operation,
                 original_error=e,
             ) from e
+        return bool(was_set)
 
-        if not was_set:
-            raise IdempotencyKeyCollisionError(operation, record.idempotency_key)
+    async def save(
+        self,
+        record: IdempotencyRecord,
+    ) -> None:
+        """Save record to Redis with NX (set if not exists).
+
+        Args:
+            record: Idempotency record to save
+
+        Raises:
+            IdempotencyKeyCollisionError: If key already exists in Redis
+            IdempotencyValidationError: If record is invalid or already expired
+            IdempotencyStorageError: If Redis operation fails
+            IdempotencyError: If serialization fails
+        """
+        key, data, ttl_seconds = self._prepare_write(record)
+
+        # Use SET with NX (only if key doesn't exist) and EX (expiration)
+        if not await self._set(record, key, data, ttl_seconds, nx=True, method="save"):
+            raise IdempotencyKeyCollisionError(record.operation, record.idempotency_key)
 
         logger.debug(
             "Saved idempotency record",
-            extra={"operation": operation, "key": record.idempotency_key, "ttl_seconds": ttl_seconds},
+            extra={"operation": record.operation, "key": record.idempotency_key, "ttl_seconds": ttl_seconds},
+        )
+
+    async def replace(self, record: IdempotencyRecord) -> None:
+        """Write record to Redis whether or not the key is already there.
+
+        This is how an in-flight reservation is completed: the pending record under the
+        key gives way to the final one. It is ``save`` without ``NX``.
+
+        Args:
+            record: Idempotency record to write
+
+        Raises:
+            IdempotencyValidationError: If record is invalid or already expired
+            IdempotencyStorageError: If Redis operation fails
+            IdempotencyError: If serialization fails
+        """
+        key, data, ttl_seconds = self._prepare_write(record)
+        await self._set(record, key, data, ttl_seconds, nx=False, method="replace")
+
+        logger.debug(
+            "Replaced idempotency record",
+            extra={"operation": record.operation, "key": record.idempotency_key, "ttl_seconds": ttl_seconds},
         )
 
     async def delete(self, operation: str, idempotency_key: str) -> bool:

@@ -12,7 +12,13 @@ from idempotency_kit import (
     IdempotencyRecordExpiredError,
     IdempotencyValidationError,
 )
-from idempotency_kit.core.constants import DEFAULT_TTL_MINUTES, MAX_TTL_SECONDS, MIN_TTL_SECONDS
+from idempotency_kit.core.constants import (
+    DEFAULT_IN_FLIGHT_LEASE_SECONDS,
+    DEFAULT_IN_FLIGHT_MODE,
+    DEFAULT_TTL_MINUTES,
+    MAX_TTL_SECONDS,
+    MIN_TTL_SECONDS,
+)
 from idempotency_kit.core.protocols.metrics import NoOpIdempotencyMetrics
 from idempotency_kit.settings import BaseIdempotencySettings
 
@@ -268,3 +274,50 @@ def test__domain_service_and_settings__agree_on_the_ttl_defaults() -> None:
     # Assert
     assert from_service == from_settings
     assert from_settings == (DEFAULT_TTL_MINUTES, MIN_TTL_SECONDS, MAX_TTL_SECONDS)
+
+
+def test__domain_service__create_pending_record__is_not_held_to_the_ttl_bounds() -> None:
+    """A lease is shorter than the record floor of a minute, and that is fine: it only has to outlive the action."""
+    # Arrange
+    service = IdempotencyDomainService()
+
+    # Act
+    record = service.create_pending_record("payment.charge", "order-42", lease_seconds=30)
+
+    # Assert
+    assert record.is_pending
+    assert record.operation == "payment.charge"
+    assert record.idempotency_key == "order-42"
+    assert 29 < record.ttl_seconds <= 30
+
+
+def test__domain_service__create_pending_record__sub_second_lease__raises_validation_error() -> None:
+    # Arrange
+    service = IdempotencyDomainService()
+
+    # Act & Assert
+    with pytest.raises(IdempotencyValidationError, match="lease_seconds must be >= 1"):
+        service.create_pending_record("op", "key", lease_seconds=0)
+
+
+def test__domain_service__create_pending_record__colon_in_key__raises_validation_error() -> None:
+    """The identifiers obey the same rules whichever state the record is in."""
+    # Arrange
+    service = IdempotencyDomainService()
+
+    # Act & Assert
+    with pytest.raises(IdempotencyValidationError, match="cannot contain ':'"):
+        service.create_pending_record("op", "key:123", lease_seconds=30)
+
+
+def test__coordinator_and_settings__agree_on_the_in_flight_defaults() -> None:
+    """One canonical mode and lease, so a coordinator built by hand or from settings behaves the same."""
+    # Arrange
+    settings = BaseIdempotencySettings(key_prefix="probe:")
+
+    # Assert
+    assert (settings.in_flight, settings.in_flight_lease_seconds) == (
+        DEFAULT_IN_FLIGHT_MODE,
+        DEFAULT_IN_FLIGHT_LEASE_SECONDS,
+    )
+    assert (DEFAULT_IN_FLIGHT_MODE, DEFAULT_IN_FLIGHT_LEASE_SECONDS) == ("wait", 30)

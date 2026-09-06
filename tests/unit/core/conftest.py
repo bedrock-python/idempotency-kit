@@ -4,10 +4,12 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fakeredis import FakeAsyncRedis as AsyncRedisClient
 
 from idempotency_kit.core.models.entities import IdempotencyRecord
 from idempotency_kit.core.protocols.adapter import ResultAdapter
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
+from idempotency_kit.infra.storage.redis.aio import RedisAsyncIdempotencyRepository
 
 
 @pytest.fixture
@@ -41,11 +43,22 @@ def mock_adapter() -> MagicMock:
 
 @pytest.fixture
 def coordinator(mock_repo: AsyncMock, mock_domain_service: MagicMock) -> AsyncIdempotencyCoordinator:
-    """Create coordinator with mocked dependencies."""
+    """Create coordinator with mocked dependencies.
+
+    It runs the unreserved flow -- read, run, ``SET NX`` -- which is the choreography the
+    mock-based tests describe; the reservation has its own tests against a fake Redis.
+    """
     return AsyncIdempotencyCoordinator(
         repository=mock_repo,
         domain_service=mock_domain_service,
+        in_flight="run",
     )
+
+
+@pytest.fixture
+def redis_repository(fake_redis: AsyncRedisClient) -> RedisAsyncIdempotencyRepository:
+    """Create the shipped repository on a fake Redis, for tests that need real storage semantics."""
+    return RedisAsyncIdempotencyRepository(fake_redis, key_prefix="probe:")
 
 
 @pytest.fixture

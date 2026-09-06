@@ -85,6 +85,80 @@ class CreateOrderUseCase:
         return result
 ```
 
+This hand-rolled flow reads, executes and then writes with `SET NX`, so two requests with the
+same key that overlap both execute; only their responses are deduplicated.
+`AsyncIdempotencyCoordinator` reserves the key before executing, which is why the decorator
+and the coordinator are the recommended shape — see [In-flight requests](#in-flight-requests).
+
+## In-flight requests
+
+The case an idempotency key exists for is a client that timed out and retried while the
+original request is still being processed. The coordinator handles it by reserving the key
+before the action runs: a pending record goes in under `SET NX` with a lease as its TTL, the
+action runs, and the completed record is written over the reservation. What a second caller
+gets while the key is reserved is the coordinator's `in_flight` mode:
+
+| `in_flight` | The second caller... | Use it when |
+|---|---|---|
+| `"wait"` (default) | polls the key every 50 ms and returns the first caller's result when it lands | the client wants an answer, not an error |
+| `"raise"` | raises `IdempotencyInProgressError` at once | the client can retry later; map it to HTTP 409 |
+| `"run"` | runs the action too and adopts the first caller's result when its own write collides | the action is genuinely safe to repeat and you want the pre-reservation flow |
+
+```python
+coordinator = AsyncIdempotencyCoordinator(
+    repo,
+    IdempotencyDomainService(),
+    in_flight="raise",
+    in_flight_lease_seconds=60,
+)
+```
+
+```python
+@app.post("/charges")
+async def charge(dto: ChargeDTO, idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    try:
+        return await use_case.execute(dto, idempotency_key=idempotency_key)
+    except IdempotencyInProgressError:
+        raise HTTPException(409, detail="a request with this Idempotency-Key is still being processed")
+```
+
+**The lease.** `in_flight_lease_seconds` (default 30) is how long the reservation is held.
+A pending record past its lease counts as absent, so a worker that crashed mid-action cannot
+wedge the key; it is also how long a waiting caller waits before it gives up with
+`IdempotencyInProgressError`. The flip side is that the lease has to be longer than the action
+can ever take, timeouts and internal retries included: a reservation that expires while the
+action is still running lets the next caller run it again.
+
+**Failures.** An action that raises, or is cancelled, deletes its reservation before the
+exception propagates, so the retry runs the action again — failures are not cached, and
+neither is the reservation of a failed action. The same happens when the result cannot be
+stored (an out-of-range TTL, a result the adapter cannot encode): the caller still gets the
+result, and the key is freed rather than holding retries for a record that never comes.
+
+**Storage trouble.** A reservation that cannot be written is logged and counted as
+`storage_reserve_error`, and the action runs unreserved — the same trade of exactly-once for
+availability the coordinator makes everywhere else. `IdempotencyInProgressError` is the one
+exception `coordinate()` and the decorator do raise: it is about the caller's request, not
+about storage.
+
+**Metrics.** The first caller is a miss; the second caller records a collision when it finds
+the reservation, then a hit when it gets the record (`"wait"`) or nothing more (`"raise"`,
+the exception is the signal). The reservation is timed under `method="reserve"`.
+
+### Upgrading
+
+Records written before this change carry no `status` and read as completed, so nothing has
+to be migrated. Two things to know before turning the default on across a fleet:
+
+- **A custom repository needs `replace`** — `save` without `NX`. The coordinator raises
+  `TypeError` at construction when the repository lacks it and `in_flight` is not `"run"`.
+- **During a rolling upgrade**, an instance still on a version without `status` reads a
+  pending record as a completed one with a `null` result. With `PydanticResultAdapter` that
+  is a decode failure and the action runs, which is the old behaviour; with
+  `JsonResultAdapter` or `VoidResultAdapter` it replays as `None`. Roll out with
+  `in_flight="run"` and switch to `"wait"` once every instance is on the new version, or
+  accept that window.
+
 ## Advanced Use Cases
 
 ### Custom TTL
@@ -184,7 +258,7 @@ The `RedisAsyncIdempotencyRepository` is fully compatible with Redis Cluster. It
 
 ## Metrics and Observability
 
-You can inject a metrics collector into the repository and the coordinator to track hits, misses, collisions, errors and latency. Each metric has one owner, so the same collector goes to both without double counting: the coordinator records hit, miss, collision and the latency of `get` and `save`; the repository records errors, the bulk hit and miss counts of `get_many`, and the latency of `delete` and `get_many`.
+You can inject a metrics collector into the repository and the coordinator to track hits, misses, collisions, errors and latency. Each metric has one owner, so the same collector goes to both without double counting: the coordinator records hit, miss, collision and the latency of `get`, `reserve` and `save`; the repository records errors, the bulk hit and miss counts of `get_many`, and the latency of `delete` and `get_many`. A collision is two callers on one key at the same time — the second one found the first one's reservation, or, with `in_flight="run"`, its own save collided.
 
 ```python
 from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol
@@ -245,6 +319,20 @@ repo = RedisAsyncIdempotencyRepository(
 )
 ```
 
+### AsyncIdempotencyCoordinator
+
+```python
+coordinator = AsyncIdempotencyCoordinator(
+    repo,
+    service,
+    operation_ttls={"order.create": 3600},  # Per-operation TTLs in seconds; win over the decorator
+    metrics=custom_metrics,                 # Optional metrics collector
+    enabled=True,                           # False runs the action and nothing else
+    in_flight="wait",                       # "wait" | "raise" | "run", see In-flight requests
+    in_flight_lease_seconds=30,             # How long a reservation is held; must outlive the action
+)
+```
+
 ### Constants
 
 `idempotency_kit.core.constants` is the single source for the TTL defaults, and
@@ -256,8 +344,11 @@ from settings and you get the same numbers.
 | `DEFAULT_TTL_MINUTES` | 60 | how long a record is kept when no TTL is given |
 | `MIN_TTL_SECONDS` | 60 | the floor every TTL is raised to |
 | `MAX_TTL_SECONDS` | 2592000 | the ceiling, thirty days |
+| `DEFAULT_IN_FLIGHT_MODE` | `"wait"` | what a second caller gets while the first is in flight |
+| `DEFAULT_IN_FLIGHT_LEASE_SECONDS` | 30 | how long a reservation is held, and the longest a caller waits |
+| `IN_FLIGHT_POLL_INTERVAL_SECONDS` | 0.05 | how often a waiting caller re-reads the key |
 
-`MAX_KEY_LENGTH` and `MAX_OPERATION_LENGTH` live beside them.
+`MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH` and the `InFlightMode` type live beside them.
 
 #### Upgrading
 
@@ -287,6 +378,7 @@ The same `idempotency_key` can be used for different operations (e.g., `user.cre
 The library defines several exceptions to handle various idempotency scenarios:
 
 - **`IdempotencyKeyCollisionError`**: Raised by `repository.save()` when you try to save a result for a key that already exists. This typically means another identical request is either being processed or has already finished.
+- **`IdempotencyInProgressError`**: Raised by `coordinator.coordinate()` and the decorator when another call with the same key is still running its action — at once with `in_flight="raise"`, after a whole lease of waiting with `in_flight="wait"`. Map it to HTTP 409.
 - **`IdempotencyRecordExpiredError`**: Raised by `service.validate_record()` if the record exists but its TTL has passed.
 - **`IdempotencyInvalidTTLError`**: Raised by `service.create_record()` if the requested TTL is outside the allowed range (configured in `IdempotencyDomainService`).
 - **`IdempotencyValidationError`**: Raised by `service.create_record()` if validation of `operation` or `idempotency_key` fails (e.g., empty string or too long).
@@ -297,8 +389,9 @@ The library defines several exceptions to handle various idempotency scenarios:
 
 1. **Natural Keys**: Use natural unique identifiers as idempotency keys if possible (e.g., `order_id`, `message_id`).
 2. **Atomic Operations**: Always save the result to the cache *after* the business logic has successfully completed.
-3. **Pydantic Support**: The library works best with Pydantic models. Use `model_dump(mode="json")` when saving and `**cached.result` when restoring.
-4. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery) than to crash (exactly-once requirement).
+3. **Lease Longer Than the Action**: Set `in_flight_lease_seconds` above the longest the action can take, timeouts and retries included; a reservation that expires mid-run lets the next caller run the action again.
+4. **Pydantic Support**: The library works best with Pydantic models. Use `model_dump(mode="json")` when saving and `**cached.result` when restoring.
+5. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery) than to crash (exactly-once requirement).
 
 ## Production Examples
 
@@ -574,7 +667,7 @@ def create_api_container(settings: Settings) -> AsyncContainer:
 
 Your own providers supply the `Redis` client and the settings object; the settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. To use another metrics backend, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
 
-`enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. A settings object that predates the field is read as enabled.
+`enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. `in_flight` and `in_flight_lease_seconds` reach the coordinator the same way. A settings object that predates these fields is read as enabled, `"wait"` and 30 seconds.
 
 ## Migration Guide
 

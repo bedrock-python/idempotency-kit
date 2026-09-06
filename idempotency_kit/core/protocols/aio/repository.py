@@ -43,6 +43,22 @@ class AsyncIdempotencyRepository(Protocol):
         """
         ...
 
+    async def replace(self, record: IdempotencyRecord) -> None:
+        """Write a record whether or not the key is already there.
+
+        The coordinator completes an in-flight reservation with it: the pending record
+        under the key gives way to the final one.
+
+        Args:
+            record: Record to write
+
+        Raises:
+            IdempotencyValidationError: If record fails validation
+            IdempotencyStorageError: If storage operation fails
+            IdempotencyError: If internal error (e.g. serialization) occurs
+        """
+        ...
+
     async def delete(self, operation: str, idempotency_key: str) -> bool:
         """Delete an idempotency record.
 

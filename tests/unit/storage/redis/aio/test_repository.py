@@ -508,7 +508,13 @@ async def test_metrics_shared_with_coordinator_count_each_operation_once(fake_re
     # Assert
     assert metrics_mock.record_miss.call_count == 1
     assert metrics_mock.record_hit.call_count == 1
-    assert [call.args[1] for call in metrics_mock.record_latency.call_args_list] == ["get", "save", "get"]
+    assert metrics_mock.record_collision.call_count == 0
+    assert [call.args[1] for call in metrics_mock.record_latency.call_args_list] == [
+        "reserve",
+        "save",
+        "reserve",
+        "get",
+    ]
 
 
 @pytest.mark.asyncio
@@ -545,3 +551,65 @@ async def test_redis_save_subsecond_ttl(fake_redis: AsyncRedisClient) -> None:
     # fake-redis might return bytes
     key_found = any(k.decode() == f"{custom_prefix}test:key" for k in keys)
     assert key_found is True
+
+
+@pytest.mark.asyncio
+async def test_redis_replace_overwrites_the_pending_record(fake_redis: AsyncRedisClient) -> None:
+    """replace() is save() without NX: it is how a reservation becomes a result."""
+    repo = RedisAsyncIdempotencyRepository(fake_redis)
+    service = IdempotencyDomainService()
+    await repo.save(service.create_pending_record("test", "key", lease_seconds=30))
+
+    await repo.replace(service.create_record("test", "key", {"foo": "bar"}, ttl_minutes=10))
+
+    stored = await repo.get("test", "key")
+    assert stored is not None
+    assert stored.status == "completed"
+    assert stored.result == {"foo": "bar"}
+    assert 500 < await fake_redis.ttl("idempotency:test:key") <= 600  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_redis_replace_writes_when_the_key_is_free(fake_redis: AsyncRedisClient) -> None:
+    """A reservation whose lease ran out leaves nothing behind; the result is still written."""
+    repo = RedisAsyncIdempotencyRepository(fake_redis)
+    service = IdempotencyDomainService()
+
+    await repo.replace(service.create_record("test", "key", {"foo": "bar"}))
+
+    stored = await repo.get("test", "key")
+    assert stored is not None
+    assert stored.result == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
+async def test_redis_replace_exception(fake_redis: AsyncRedisClient) -> None:
+    """Test replace() when Redis raises an exception."""
+    repo = RedisAsyncIdempotencyRepository(fake_redis)
+    service = IdempotencyDomainService()
+    record = service.create_record("test", "key", {})
+    original_exc = Exception("Redis down")
+    with (
+        patch.object(fake_redis, "set", side_effect=original_exc),
+        pytest.raises(IdempotencyStorageError, match="Redis storage failure during replace") as exc_info,
+    ):
+        await repo.replace(record)
+    assert exc_info.value.original_error is original_exc
+
+
+@pytest.mark.asyncio
+async def test_redis_replace_expired_record(fake_redis: AsyncRedisClient) -> None:
+    """Test that replacing with an already expired record raises an error."""
+    repo = RedisAsyncIdempotencyRepository(fake_redis)
+
+    now = datetime.now(UTC)
+    record = IdempotencyRecord(
+        operation="test",
+        idempotency_key="key",
+        result={},
+        created_at=now - timedelta(minutes=20),
+        expires_at=now - timedelta(minutes=10),
+    )
+
+    with pytest.raises(IdempotencyValidationError, match="Cannot save already expired record"):
+        await repo.replace(record)

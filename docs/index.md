@@ -157,12 +157,12 @@ return order
 
 ### 4. Concurrent Requests Handled
 
-If two requests arrive simultaneously:
+If two requests arrive while the first is still executing:
 
-- First request: cache miss → execute → save ✅
-- Second request: collision on save → fetch first result → return ✅
+- First request: reserves the key → execute → write the result over the reservation ✅
+- Second request: finds the reservation → waits for the first result → return ✅ (or a 409 with `in_flight="raise"`)
 
-Both requests get the **same result** - idempotency guaranteed!
+Both requests get the **same result**, and the business logic ran once.
 
 ## Why idempotency-kit?
 

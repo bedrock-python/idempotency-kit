@@ -13,6 +13,7 @@ from idempotency_kit import (
     JsonResultAdapter,
     NoOpIdempotencyMetrics,
 )
+from idempotency_kit.core.constants import InFlightMode
 from idempotency_kit.dishka import (
     AsyncIdempotencyCoordinatorProvider,
     AsyncRedisIdempotencyProvider,
@@ -28,10 +29,19 @@ class _AppProvider(Provider):
 
     scope = Scope.APP
 
-    def __init__(self, *, metrics_enabled: bool, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        metrics_enabled: bool,
+        enabled: bool = True,
+        in_flight: InFlightMode = "wait",
+        in_flight_lease_seconds: int = 30,
+    ) -> None:
         super().__init__()
         self._metrics_enabled = metrics_enabled
         self._enabled = enabled
+        self._in_flight = in_flight
+        self._in_flight_lease_seconds = in_flight_lease_seconds
 
     @provide
     def settings(self) -> IdempotencySettingsProtocol:
@@ -40,6 +50,8 @@ class _AppProvider(Provider):
             key_prefix="probe:",
             metrics_enabled=self._metrics_enabled,
             enabled=self._enabled,
+            in_flight=self._in_flight,
+            in_flight_lease_seconds=self._in_flight_lease_seconds,
         )
 
     @provide
@@ -185,5 +197,27 @@ async def test__shipped_providers__settings_disabled__coordinator_is_a_pass_thro
         assert calls == 2
         repository = await container.get(AsyncIdempotencyRepository)
         assert await repository.get("op.disabled", "key") is None
+    finally:
+        await container.close()
+
+
+@pytest.mark.asyncio
+async def test__shipped_providers__in_flight_settings__reach_the_coordinator() -> None:
+    """The mode and the lease on the settings object are what the provided coordinator runs with."""
+    # Arrange
+    container = make_async_container(
+        _AppProvider(metrics_enabled=False, in_flight="raise", in_flight_lease_seconds=5),
+        IdempotencyProvider(),
+        AsyncRedisIdempotencyProvider(),
+        AsyncIdempotencyCoordinatorProvider(),
+    )
+
+    # Act
+    try:
+        coordinator = await container.get(AsyncIdempotencyCoordinator)
+
+        # Assert
+        assert coordinator._in_flight == "raise"
+        assert coordinator._in_flight_lease_seconds == 5
     finally:
         await container.close()

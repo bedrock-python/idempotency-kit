@@ -54,3 +54,12 @@ class IdempotencyInvalidTTLError(IdempotencyError):
         self.min_ttl = min_ttl
         self.max_ttl = max_ttl
         super().__init__(f"Invalid TTL {ttl_seconds}s. Must be between {min_ttl}s and {max_ttl}s")
+
+
+class IdempotencyInProgressError(IdempotencyError):
+    """Raised when another call with the same key is still running its action."""
+
+    def __init__(self, operation: str, key: str) -> None:
+        self.operation = operation
+        self.key = key
+        super().__init__(f"Idempotency record for operation '{operation}', key '{key}' is still in flight")

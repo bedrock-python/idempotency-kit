@@ -110,3 +110,44 @@ def test__idempotency_record__any_json_result__is_accepted(result: object) -> No
 
     # Assert
     assert record.result == result
+
+
+def test__idempotency_record__built_without_a_status__is_completed() -> None:
+    """A record is a stored result unless it says otherwise."""
+    # Act
+    record = IdempotencyRecord.create(operation="op", idempotency_key="key", result={"id": 1}, ttl_seconds=60)
+
+    # Assert
+    assert record.status == "completed"
+    assert not record.is_pending
+
+
+def test__idempotency_record__json_written_before_the_status_existed__still_decodes_as_completed() -> None:
+    """Records already in Redis carry no ``status``; they must read back as the results they are."""
+    # Arrange
+    stored = (
+        '{"operation": "op", "idempotency_key": "key", "result": {"id": 1}, '
+        '"created_at": "2026-09-06T00:00:00Z", "expires_at": "2126-09-06T00:00:00Z"}'
+    )
+
+    # Act
+    record = IdempotencyRecord.model_validate_json(stored)
+
+    # Assert
+    assert record.status == "completed"
+    assert record.result == {"id": 1}
+    assert not record.is_pending
+
+
+def test__idempotency_record_pending__lease__creates_an_in_flight_reservation() -> None:
+    """The reservation is the record in its pending state, with the lease as its expiry."""
+    # Act
+    record = IdempotencyRecord.pending(operation="op", idempotency_key="key", lease_seconds=30)
+
+    # Assert
+    assert record.is_pending
+    assert record.status == "pending"
+    assert record.result is None
+    assert not record.is_expired
+    assert 29 < record.ttl_seconds <= 30
+    assert record.model_dump(mode="json")["status"] == "pending"

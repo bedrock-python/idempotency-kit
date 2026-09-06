@@ -296,7 +296,8 @@ async def test__coordinator__record_validation_error__returns_result_and_reports
 
     # Assert
     assert result == {"data": "ok"}
-    mock_repo.save.assert_not_called()
+    mock_repo.replace.assert_not_called()
+    mock_repo.delete.assert_called_once_with("op", "key")  # the reservation goes with the result that never came
     metrics.record_error.assert_called_once_with("op", "record_validation_error")
 
 
