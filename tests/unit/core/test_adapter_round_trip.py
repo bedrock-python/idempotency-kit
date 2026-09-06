@@ -109,3 +109,13 @@ async def test__coordinator__pydantic_adapter_on_a_none_result__stores_nothing_a
         (("op.absent", "record_validation_error"),),
         (("op.absent", "record_validation_error"),),
     ]
+
+
+def test__pydantic_adapter__null_payload__raises() -> None:
+    """A stored null is the one payload this adapter cannot turn back into a model."""
+    # Arrange
+    adapter: PydanticResultAdapter[_Order] = PydanticResultAdapter(_Order)
+
+    # Act & Assert
+    with pytest.raises(ValueError, match="null idempotency payload"):
+        adapter.decode(None)

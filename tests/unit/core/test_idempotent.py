@@ -1,7 +1,8 @@
 """Unit tests for async idempotent decorator."""
 
 import logging
-from unittest.mock import ANY, MagicMock
+from typing import Any
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -196,3 +197,51 @@ async def test__decorator__no_coordinator__warns(mock_adapter: MagicMock, caplog
         "No idempotency coordinator found; running the operation without idempotency"
     ]
     assert caplog.records[0].operation == operation  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test__decorator__infra_param_on_self__calls_coordinator(
+    mock_coordinator: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """infra_param names an attribute of the instance, not only a keyword argument."""
+    # Arrange
+    mock_coordinator.coordinate.return_value = "ok"
+
+    class MyService:
+        def __init__(self, coordinator: AsyncIdempotencyCoordinator) -> None:
+            self._idempotency = coordinator
+
+        @async_idempotent(operation="test.op", adapter=mock_adapter, infra_param="_idempotency")
+        async def my_method(self, *, idempotency_key: str | None = None) -> str:
+            return "not used"
+
+    service = MyService(mock_coordinator)
+
+    # Act
+    result = await service.my_method(idempotency_key="test-key")
+
+    # Assert
+    assert result == "ok"
+    mock_coordinator.coordinate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test__decorator__uninspectable_signature__still_reads_the_key_from_kwargs(
+    mock_coordinator: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """A callable inspect cannot describe keeps the keyword-argument lookup."""
+    # Arrange
+    mock_coordinator.coordinate.return_value = "ok"
+
+    with patch("inspect.signature", side_effect=ValueError("no signature found")):
+
+        @async_idempotent(operation="test.op", adapter=mock_adapter)
+        async def my_func(**kwargs: Any) -> str:
+            return "not used"
+
+    # Act
+    result = await my_func(idempotency_key="test-key", coord=mock_coordinator)
+
+    # Assert
+    assert result == "ok"
+    mock_coordinator.coordinate.assert_called_once()
