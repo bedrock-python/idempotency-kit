@@ -12,7 +12,9 @@ from idempotency_kit import (
     IdempotencyRecordExpiredError,
     IdempotencyValidationError,
 )
+from idempotency_kit.core.constants import DEFAULT_TTL_MINUTES, MAX_TTL_SECONDS, MIN_TTL_SECONDS
 from idempotency_kit.core.protocols.metrics import NoOpIdempotencyMetrics
+from idempotency_kit.settings import BaseIdempotencySettings
 
 
 def test__domain_service__valid_input__creates_record() -> None:
@@ -75,7 +77,7 @@ def test__domain_service__empty_field__raises_validation_error(field: str, value
     ("ttl_minutes", "reason"),
     [
         (0, "below_minimum"),
-        (2000, "above_maximum"),
+        (MAX_TTL_SECONDS // 60 + 1, "above_maximum"),
     ],
     ids=["ttl_zero", "ttl_too_large"],
 )
@@ -251,3 +253,18 @@ def test__noop_metrics__all_methods__do_not_raise() -> None:
     metrics.record_latency("op", "method", 0.1)
     metrics.record_bulk_hit("op", 5)
     metrics.record_bulk_miss("op", 5)
+
+
+def test__domain_service_and_settings__agree_on_the_ttl_defaults() -> None:
+    """One canonical set of TTL defaults, so the bounds do not depend on how the service was built."""
+    # Arrange
+    service = IdempotencyDomainService()
+    settings = BaseIdempotencySettings(key_prefix="probe:")
+
+    # Act
+    from_service = (service.default_ttl_minutes, service.min_ttl_seconds, service.max_ttl_seconds)
+    from_settings = (settings.default_ttl_minutes, settings.min_ttl_seconds, settings.max_ttl_seconds)
+
+    # Assert
+    assert from_service == from_settings
+    assert from_settings == (DEFAULT_TTL_MINUTES, MIN_TTL_SECONDS, MAX_TTL_SECONDS)
