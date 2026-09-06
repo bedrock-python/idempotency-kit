@@ -1,4 +1,6 @@
 import functools
+import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -6,6 +8,22 @@ from idempotency_kit.core.protocols.adapter import ResultAdapter
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+_POSITIONAL_KINDS = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+
+
+def _positional_index(func: Callable[..., Any], key_param: str) -> int | None:
+    """Index at which ``key_param`` can arrive positionally, or ``None`` if it cannot."""
+    try:
+        parameters = list(inspect.signature(func).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    for index, parameter in enumerate(parameters):
+        if parameter.name == key_param and parameter.kind in _POSITIONAL_KINDS:
+            return index
+    return None
 
 
 def async_idempotent(
@@ -25,56 +43,38 @@ def async_idempotent(
         adapter: Result adapter for encoding/decoding.
         ttl_seconds: Optional TTL for idempotency record in seconds.
             If not provided, uses value from coordinator settings or global default.
-        key_param: Name of the argument containing the idempotency key.
+        key_param: Name of the argument containing the idempotency key. Read from the
+            keyword arguments, or from the positional arguments when the parameter can
+            be passed positionally.
         infra_param: Optional name of the argument or attribute containing AsyncIdempotencyCoordinator.
             If not provided, searches for AsyncIdempotencyCoordinator by type.
     """
 
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+        key_index = _positional_index(func, key_param)
+
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> T:
             # 1. Resolve idempotency key
-            idempotency_key = kwargs.get(key_param)
+            idempotency_key = _resolve_key(args, kwargs)
             if not idempotency_key:
                 return await func(*args, **kwargs)
 
             # 2. Resolve coordinator
-            coordinator: AsyncIdempotencyCoordinator | None = None
+            coordinator = _resolve_coordinator(args, kwargs)
 
-            # 2.1. Try to find by name if infra_param is provided
-            if infra_param:
-                if infra_param in kwargs:
-                    coordinator = kwargs[infra_param]
-                elif args and hasattr(args[0], infra_param):
-                    coordinator = getattr(args[0], infra_param)
-
-            # 2.2. Try to find by type if not found or infra_param is None
-            if not coordinator:
-                # Search in kwargs
-                for val in kwargs.values():
-                    if isinstance(val, AsyncIdempotencyCoordinator):
-                        coordinator = val
-                        break
-
-                # Search in args (skipping self if it was already checked)
-                if not coordinator:
-                    for arg in args:
-                        if isinstance(arg, AsyncIdempotencyCoordinator):
-                            coordinator = arg
-                            break
-                        # Also check self attributes if arg is 'self'
-                        # We do this because DI often injects into attributes
-                        if hasattr(arg, "__dict__"):
-                            for attr_val in vars(arg).values():
-                                if isinstance(attr_val, AsyncIdempotencyCoordinator):
-                                    coordinator = attr_val
-                                    break
-                        if coordinator:
-                            break
-
-            if not coordinator:
-                # If no coordinator found but key is present, we might want to fail or proceed
-                # Proceeding without idempotency is safer but should probably be logged
+            if coordinator is None:
+                # Proceeding without idempotency keeps the operation available, but it is
+                # never what the decorator was put there for: say so loudly enough to be
+                # caught by whoever renamed the attribute or forgot the argument.
+                logger.warning(
+                    "No idempotency coordinator found; running the operation without idempotency",
+                    extra={
+                        "operation": operation,
+                        "idempotency_key": idempotency_key,
+                        "infra_param": infra_param,
+                    },
+                )
                 return await func(*args, **kwargs)
 
             # 3. Delegate to coordinator
@@ -87,6 +87,38 @@ def async_idempotent(
                 *args,
                 **kwargs,
             )
+
+        def _resolve_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if key_param in kwargs:
+                return kwargs[key_param]
+            if key_index is not None and key_index < len(args):
+                return args[key_index]
+            return None
+
+        def _resolve_coordinator(args: tuple[Any, ...], kwargs: dict[str, Any]) -> AsyncIdempotencyCoordinator | None:
+            # By name, if infra_param is provided
+            if infra_param:
+                named: AsyncIdempotencyCoordinator | None = kwargs.get(infra_param)
+                if named is None and args:
+                    named = getattr(args[0], infra_param, None)
+                if named is not None:
+                    return named
+
+            # By type, in the keyword arguments
+            for val in kwargs.values():
+                if isinstance(val, AsyncIdempotencyCoordinator):
+                    return val
+
+            # By type, in the positional arguments, then in their attributes:
+            # DI often injects the coordinator into an attribute of 'self'.
+            for arg in args:
+                if isinstance(arg, AsyncIdempotencyCoordinator):
+                    return arg
+                if hasattr(arg, "__dict__"):
+                    for attr_val in vars(arg).values():
+                        if isinstance(attr_val, AsyncIdempotencyCoordinator):
+                            return attr_val
+            return None
 
         return wrapper
 
