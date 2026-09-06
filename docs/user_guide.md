@@ -247,10 +247,29 @@ repo = RedisAsyncIdempotencyRepository(
 
 ### Constants
 
-These three defaults are the same numbers `BaseIdempotencySettings` uses for its own fields.
-See `idempotency_kit.core.constants` for:
-- `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH`
-- `DEFAULT_TTL_MINUTES`, `MIN_TTL_SECONDS`, `MAX_TTL_SECONDS`
+`idempotency_kit.core.constants` is the single source for the TTL defaults, and
+`BaseIdempotencySettings` takes its field defaults from it — build the service by hand or
+from settings and you get the same numbers.
+
+| Constant | Value | What it bounds |
+|---|---|---|
+| `DEFAULT_TTL_MINUTES` | 60 | how long a record is kept when no TTL is given |
+| `MIN_TTL_SECONDS` | 60 | the floor every TTL is raised to |
+| `MAX_TTL_SECONDS` | 2592000 | the ceiling, thirty days |
+
+`MAX_KEY_LENGTH` and `MAX_OPERATION_LENGTH` live beside them.
+
+#### Upgrading
+
+These numbers used to depend on how the service was built: `IdempotencyDomainService`
+defaulted to 30 minutes with a 24-hour ceiling, while `BaseIdempotencySettings` shipped 60
+minutes and 30 days. They agree now, and the wider pair won — narrowing would have started
+rejecting TTLs that work today, and an out-of-range TTL is swallowed, so those operations
+would have gone quietly uncached rather than failing loudly.
+
+So a service built with no arguments now keeps records for an hour rather than half of one.
+Pass `default_ttl_minutes=30` and `max_ttl_seconds=86400` explicitly to keep the old
+behaviour.
 
 ### Key Scope and Format
 The same `idempotency_key` can be used for different operations (e.g., `user.create` and `identifier.attach`) because the repository prefixes the key with the operation name.
