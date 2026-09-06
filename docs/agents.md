@@ -178,7 +178,7 @@ result = await coordinator.coordinate(
 
 | Method | Returns | Raises |
 |---|---|---|
-| `get(operation, idempotency_key)` | `IdempotencyRecord \| None` | `IdempotencyValidationError`, `IdempotencyStorageError`, `IdempotencyError` |
+| `get(operation, idempotency_key)` | `IdempotencyRecord | None` | `IdempotencyValidationError`, `IdempotencyStorageError`, `IdempotencyError` |
 | `save(record)` | `None` | `IdempotencyKeyCollisionError`, `IdempotencyValidationError`, `IdempotencyStorageError`, `IdempotencyError` |
 | `delete(operation, idempotency_key)` | `bool` | `IdempotencyValidationError`, `IdempotencyStorageError` |
 | `get_many(operation, idempotency_keys)` | `dict[str, IdempotencyRecord]` | as `get`; only found keys appear |
