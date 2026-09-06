@@ -6,6 +6,7 @@ operation re-executed on every call.
 """
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from fakeredis import FakeAsyncRedis as AsyncRedisClient
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 from idempotency_kit import (
     AsyncIdempotencyCoordinator,
     IdempotencyDomainService,
+    IdempotencyMetricsProtocol,
     JsonResultAdapter,
     PydanticResultAdapter,
     ResultAdapter,
@@ -27,6 +29,10 @@ class _Order(BaseModel):
     status: str
 
 
+class _Ack(BaseModel):
+    """A model that dumps to an empty mapping -- an acknowledgement carrying no fields."""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter", "value"),
@@ -37,8 +43,17 @@ class _Order(BaseModel):
         (JsonResultAdapter(), None),
         (JsonResultAdapter(), "plain string"),
         (PydanticResultAdapter(_Order), _Order(id=1, status="paid")),
+        (PydanticResultAdapter(_Ack), _Ack()),
     ],
-    ids=["void", "json-mapping", "json-list", "json-null", "json-string", "pydantic-model"],
+    ids=[
+        "void",
+        "json-mapping",
+        "json-list",
+        "json-null",
+        "json-string",
+        "pydantic-model",
+        "pydantic-empty-model",
+    ],
 )
 async def test__coordinator__shipped_adapter_round_trip__executes_once_and_replays_the_stored_result(
     fake_redis: AsyncRedisClient, adapter: ResultAdapter[Any], value: Any
@@ -62,3 +77,35 @@ async def test__coordinator__shipped_adapter_round_trip__executes_once_and_repla
     assert first == value
     assert second == value
     assert await fake_redis.get("probe:op.round-trip:key-1") is not None
+
+
+@pytest.mark.asyncio
+async def test__coordinator__pydantic_adapter_on_a_none_result__stores_nothing_and_reports_it(
+    fake_redis: AsyncRedisClient,
+) -> None:
+    """A None the adapter cannot represent must not become a record that never decodes again."""
+    # Arrange
+    metrics = MagicMock(spec=IdempotencyMetricsProtocol)
+    repository = RedisAsyncIdempotencyRepository(fake_redis, key_prefix="probe:")
+    coordinator = AsyncIdempotencyCoordinator(
+        repository=repository, domain_service=IdempotencyDomainService(), metrics=metrics
+    )
+    calls = 0
+
+    async def action() -> Any:
+        nonlocal calls
+        calls += 1
+        return None
+
+    # Act
+    first = await coordinator.coordinate("op.absent", "key-1", 600, PydanticResultAdapter(_Order), action)
+    second = await coordinator.coordinate("op.absent", "key-1", 600, PydanticResultAdapter(_Order), action)
+
+    # Assert
+    assert (first, second) == (None, None)
+    assert calls == 2
+    assert await fake_redis.get("probe:op.absent:key-1") is None
+    assert metrics.record_error.call_args_list == [
+        (("op.absent", "record_validation_error"),),
+        (("op.absent", "record_validation_error"),),
+    ]
