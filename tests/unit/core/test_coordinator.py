@@ -1,6 +1,6 @@
 """Unit tests for async idempotency coordinator."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from idempotency_kit.core.exceptions import IdempotencyKeyCollisionError, IdempotencyValidationError
 from idempotency_kit.core.models.entities import IdempotencyRecord
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
+from idempotency_kit.core.services.domain import IdempotencyDomainService
 
 
 @pytest.mark.asyncio
@@ -297,3 +298,36 @@ async def test__coordinator__record_validation_error__returns_result_and_reports
     assert result == {"data": "ok"}
     mock_repo.save.assert_not_called()
     metrics.record_error.assert_called_once_with("op", "record_validation_error")
+
+
+@pytest.mark.asyncio
+async def test__coordinator__expired_record_from_repository__is_a_miss(
+    mock_repo: AsyncMock, mock_adapter: MagicMock
+) -> None:
+    """Expiry is the domain's rule, so a repository that hands back a stale record must not replay it."""
+    # Arrange
+    now = datetime.now(UTC)
+    stale = IdempotencyRecord(
+        operation="op",
+        idempotency_key="key",
+        result={"data": "stale"},
+        created_at=now - timedelta(hours=2),
+        expires_at=now - timedelta(hours=1),
+    )
+    metrics = MagicMock()
+    coordinator = AsyncIdempotencyCoordinator(
+        repository=mock_repo,
+        domain_service=IdempotencyDomainService(),
+        metrics=metrics,
+    )
+    mock_repo.get.return_value = stale
+    action = AsyncMock(return_value={"data": "fresh"})
+
+    # Act
+    result = await coordinator.coordinate("op", "key", 600, mock_adapter, action)
+
+    # Assert
+    assert result == {"data": "fresh"}
+    action.assert_called_once()
+    mock_adapter.decode.assert_not_called()
+    metrics.record_miss.assert_called_once_with("op")

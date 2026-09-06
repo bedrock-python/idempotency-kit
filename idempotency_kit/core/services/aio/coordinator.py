@@ -7,6 +7,7 @@ from typing import Any, Generic, TypeVar
 from idempotency_kit.core.exceptions import (
     IdempotencyInvalidTTLError,
     IdempotencyKeyCollisionError,
+    IdempotencyRecordExpiredError,
     IdempotencyValidationError,
 )
 from idempotency_kit.core.protocols.adapter import ResultAdapter
@@ -162,6 +163,16 @@ class AsyncIdempotencyCoordinator:
         """Fetch record from repository and decode it safely; ``None`` means no usable record."""
         cached = await self._repo.get(operation, idempotency_key)
         if cached is None:
+            return None
+        try:
+            # The protocol asks a repository not to return an expired record, but expiry is
+            # the domain's rule to enforce, and a backend without native expiry cannot.
+            self._svc.validate_record(cached)
+        except IdempotencyRecordExpiredError:
+            logger.warning(
+                "Idempotency record expired; treating it as a miss",
+                extra={"operation": operation, "idempotency_key": idempotency_key},
+            )
             return None
         return self._decode_safely(adapter, cached.result, operation, idempotency_key)
 
