@@ -331,3 +331,29 @@ async def test__coordinator__expired_record_from_repository__is_a_miss(
     action.assert_called_once()
     mock_adapter.decode.assert_not_called()
     metrics.record_miss.assert_called_once_with("op")
+
+
+@pytest.mark.asyncio
+async def test__coordinator__disabled__runs_the_action_without_touching_storage(
+    mock_repo: AsyncMock, mock_domain_service: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """enabled=False is a kill switch: no read, no write, no metric."""
+    # Arrange
+    metrics = MagicMock()
+    coordinator = AsyncIdempotencyCoordinator(
+        repository=mock_repo,
+        domain_service=mock_domain_service,
+        metrics=metrics,
+        enabled=False,
+    )
+    action = AsyncMock(return_value="fresh")
+
+    # Act
+    result = await coordinator.coordinate("op", "key", 60, mock_adapter, action)
+
+    # Assert
+    assert result == "fresh"
+    action.assert_called_once()
+    mock_repo.get.assert_not_called()
+    mock_repo.save.assert_not_called()
+    metrics.record_miss.assert_not_called()

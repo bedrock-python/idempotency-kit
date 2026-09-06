@@ -10,6 +10,7 @@ from idempotency_kit import (
     AsyncIdempotencyCoordinator,
     AsyncIdempotencyRepository,
     IdempotencyMetricsProtocol,
+    JsonResultAdapter,
     NoOpIdempotencyMetrics,
 )
 from idempotency_kit.dishka import (
@@ -27,14 +28,19 @@ class _AppProvider(Provider):
 
     scope = Scope.APP
 
-    def __init__(self, *, metrics_enabled: bool) -> None:
+    def __init__(self, *, metrics_enabled: bool, enabled: bool = True) -> None:
         super().__init__()
         self._metrics_enabled = metrics_enabled
+        self._enabled = enabled
 
     @provide
     def settings(self) -> IdempotencySettingsProtocol:
         """Provide idempotency settings."""
-        return BaseIdempotencySettings(key_prefix="probe:", metrics_enabled=self._metrics_enabled)
+        return BaseIdempotencySettings(
+            key_prefix="probe:",
+            metrics_enabled=self._metrics_enabled,
+            enabled=self._enabled,
+        )
 
     @provide
     def redis(self) -> AsyncRedisClient:
@@ -148,5 +154,36 @@ async def test__idempotency_provider__without_redis_provider__resolves_metrics()
 
         # Assert
         assert isinstance(metrics, NoOpIdempotencyMetrics)
+    finally:
+        await container.close()
+
+
+@pytest.mark.asyncio
+async def test__shipped_providers__settings_disabled__coordinator_is_a_pass_through() -> None:
+    """settings.enabled=False has to reach the coordinator the providers build."""
+    # Arrange
+    container = make_async_container(
+        _AppProvider(metrics_enabled=False, enabled=False),
+        IdempotencyProvider(),
+        AsyncRedisIdempotencyProvider(),
+        AsyncIdempotencyCoordinatorProvider(),
+    )
+    calls = 0
+
+    async def action() -> str:
+        nonlocal calls
+        calls += 1
+        return "ran"
+
+    # Act
+    try:
+        coordinator = await container.get(AsyncIdempotencyCoordinator)
+        await coordinator.coordinate("op.disabled", "key", 600, JsonResultAdapter(), action)
+        await coordinator.coordinate("op.disabled", "key", 600, JsonResultAdapter(), action)
+
+        # Assert
+        assert calls == 2
+        repository = await container.get(AsyncIdempotencyRepository)
+        assert await repository.get("op.disabled", "key") is None
     finally:
         await container.close()

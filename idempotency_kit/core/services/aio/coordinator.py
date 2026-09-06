@@ -33,7 +33,15 @@ class _Hit(Generic[T]):
 
 
 class AsyncIdempotencyCoordinator:
-    """Coordinator for asynchronous idempotent operations."""
+    """Coordinator for asynchronous idempotent operations.
+
+    Args:
+        repository: Storage for idempotency records.
+        domain_service: Record factory and TTL bounds.
+        operation_ttls: Per-operation TTL overrides in seconds; wins over the decorator.
+        metrics: Metrics collector for hits, misses, collisions, errors and latency.
+        enabled: Set to False to make every call a pass-through to the action.
+    """
 
     def __init__(
         self,
@@ -41,11 +49,13 @@ class AsyncIdempotencyCoordinator:
         domain_service: IdempotencyDomainService,
         operation_ttls: dict[str, int] | None = None,
         metrics: IdempotencyMetricsProtocol | None = None,
+        enabled: bool = True,
     ) -> None:
         self._repo = repository
         self._svc = domain_service
         self._operation_ttls = operation_ttls or {}
         self._metrics = metrics or NoOpIdempotencyMetrics()
+        self._enabled = enabled
 
     async def coordinate(
         self,
@@ -58,8 +68,12 @@ class AsyncIdempotencyCoordinator:
         *args: Any,
         **kwargs: Any,
     ) -> T:
-        """Coordinate an idempotent operation."""
-        if not idempotency_key:
+        """Coordinate an idempotent operation.
+
+        With ``enabled=False`` the action is simply run: nothing is read, nothing is
+        written, and no metric is recorded.
+        """
+        if not self._enabled or not idempotency_key:
             return await action(*args, **kwargs)
 
         # 1. Try to get from storage

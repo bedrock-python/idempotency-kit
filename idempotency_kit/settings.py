@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 class BaseIdempotencySettings(BaseModel):
     """Common configuration for idempotency kit."""
 
-    enabled: bool = Field(default=True, description="Whether idempotency is enabled")
+    enabled: bool = Field(
+        default=True,
+        description="Whether the coordinator applies idempotency; False makes every call a pass-through",
+    )
     key_prefix: str = Field(description="Redis key prefix for idempotency records")
     metrics_enabled: bool = Field(default=False, description="Whether idempotency metrics are enabled")
     default_ttl_minutes: int = Field(default=60, description="Default TTL for records in minutes")
