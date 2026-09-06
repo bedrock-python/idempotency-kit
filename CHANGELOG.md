@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.1...idempotency-kit-v0.1.2) (2026-09-06)
+
+
+### Documentation
+
+* org-wide security policy and code of conduct ([#15](https://github.com/bedrock-python/idempotency-kit/issues/15)) ([7135945](https://github.com/bedrock-python/idempotency-kit/commit/7135945fd22e131cfd2521699405d5691204bcdc))
+
 ## [0.1.1](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.0...idempotency-kit-v0.1.1) (2026-08-28)
 
 
