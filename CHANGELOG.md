@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.1...idempotency-kit-v0.2.0) (2026-09-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* DEFAULT_TTL_MINUTES is 60 (was 30) and MAX_TTL_SECONDS is 2592000 (was 86400), so IdempotencyDomainService() built without arguments now keeps records for an hour and accepts a TTL of up to 30 days. Pass default_ttl_minutes=30 and max_ttl_seconds=86400 to keep the old values.
+
+### Bug Fixes
+
+* the defects the agents page turned up ([#22](https://github.com/bedrock-python/idempotency-kit/issues/22)) ([1573db4](https://github.com/bedrock-python/idempotency-kit/commit/1573db4774191598cad38b02e653b2656d3bb763))
+
+
+### Documentation
+
+* an upgrade note for the unified TTL defaults ([#25](https://github.com/bedrock-python/idempotency-kit/issues/25)) ([bb90e84](https://github.com/bedrock-python/idempotency-kit/commit/bb90e8453e0ac74856b354b34f01dfe495e9393c))
+
 ## [0.1.1](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.0...idempotency-kit-v0.1.1) (2026-08-28)
 
 
