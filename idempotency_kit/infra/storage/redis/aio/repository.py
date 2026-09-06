@@ -74,11 +74,11 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
 
     def _deserialize_record(
         self,
-        data: bytes,
+        data: bytes | str,
         operation: str,
         idempotency_key: str,
     ) -> IdempotencyRecord | None:
-        """Deserialize record from JSON bytes.
+        """Deserialize record from its JSON payload (bytes, or str with ``decode_responses``).
 
         Returns None if record is expired.
         Raises IdempotencyValidationError or IdempotencyError on corruption.
