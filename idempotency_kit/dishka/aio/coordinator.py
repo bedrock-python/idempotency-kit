@@ -8,6 +8,7 @@ from idempotency_kit import (
     IdempotencyDomainService,
     IdempotencyMetricsProtocol,
 )
+from idempotency_kit.core.constants import DEFAULT_IN_FLIGHT_LEASE_SECONDS, DEFAULT_IN_FLIGHT_MODE
 
 from ..protocols import IdempotencySettingsProtocol
 
@@ -32,6 +33,8 @@ class AsyncIdempotencyCoordinatorProvider(Provider):
             operation_ttls=settings.operation_ttls,
             metrics=metrics,
             # Read defensively: settings objects written against the protocol before
-            # ``enabled`` was part of it stay valid, and they mean enabled.
+            # these fields were part of it stay valid, and they mean the defaults.
             enabled=getattr(settings, "enabled", True),
+            in_flight=getattr(settings, "in_flight", DEFAULT_IN_FLIGHT_MODE),
+            in_flight_lease_seconds=getattr(settings, "in_flight_lease_seconds", DEFAULT_IN_FLIGHT_LEASE_SECONDS),
         )

@@ -27,7 +27,7 @@ Ensure operations execute exactly once, even when called multiple times with the
 - **Type-Safe** — full type hints with Pydantic validation
 - **Async First** — built for asyncio applications
 - **Graceful Degradation** — high availability over strict exactly-once
-- **Collision Handling** — automatic resolution of concurrent requests
+- **In-flight Reservation** — a retry that arrives while the original is still running waits for its result or gets a 409; the action runs once
 - **Observability** — built-in metrics (hits, misses, collisions, latency)
 - **Bulk Operations** — efficient `get_many`, `save_many`, `delete_many`
 - **Redis Cluster Compatible** — non-transactional pipelines
@@ -110,12 +110,12 @@ return order
 
 ### 4. Concurrent requests handled
 
-If two requests arrive simultaneously:
+If two requests arrive while the first is still executing:
 
-- First request: cache miss → execute → save ✅
-- Second request: collision on save → fetch first result → return ✅
+- First request: reserves the key → execute → write the result over the reservation ✅
+- Second request: finds the reservation → waits for the first result → return ✅ (or a 409 with `in_flight="raise"`)
 
-Both requests get the **same result** - idempotency guaranteed!
+Both requests get the **same result**, and the business logic ran once.
 
 ## Use cases
 

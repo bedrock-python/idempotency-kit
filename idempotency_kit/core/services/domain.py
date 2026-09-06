@@ -89,6 +89,41 @@ class IdempotencyDomainService:
             # Re-map Pydantic validation error to domain validation error with detailed errors
             raise IdempotencyValidationError(str(e), errors=e.errors()) from e
 
+    def create_pending_record(
+        self,
+        operation: str,
+        idempotency_key: str,
+        *,
+        lease_seconds: int,
+    ) -> IdempotencyRecord:
+        """Create the in-flight reservation for an operation whose action is about to run.
+
+        The lease is not a record TTL and is not held to the TTL bounds: it only has to
+        outlive the action, and the coordinator decides it.
+
+        Args:
+            operation: Operation name (e.g., 'user.create')
+            idempotency_key: Unique key for this operation
+            lease_seconds: How long the reservation is held before it counts as abandoned
+
+        Returns:
+            A pending IdempotencyRecord ready to be saved
+
+        Raises:
+            IdempotencyValidationError: If validation fails, or the lease is below a second
+        """
+        if lease_seconds < 1:
+            raise IdempotencyValidationError(f"lease_seconds must be >= 1, got {lease_seconds}")
+
+        try:
+            return IdempotencyRecord.pending(
+                operation=operation,
+                idempotency_key=idempotency_key,
+                lease_seconds=lease_seconds,
+            )
+        except ValidationError as e:
+            raise IdempotencyValidationError(str(e), errors=e.errors()) from e
+
     def validate_record(self, record: IdempotencyRecord) -> None:
         """Validate that record is still usable.
 

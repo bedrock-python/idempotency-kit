@@ -121,6 +121,12 @@ Request B --key--> Check (miss) --> Execute --> Save ❌ (collision)
                                              Get A's result
 ```
 
+That is the hand-rolled flow above, where both requests execute and only the responses are
+deduplicated. `AsyncIdempotencyCoordinator` and `@async_idempotent` reserve the key before
+executing, so request B waits for A's result — or is refused with
+`IdempotencyInProgressError` — instead of executing too. See
+[In-flight requests](user_guide.md#in-flight-requests) in the User Guide.
+
 ## Key Concepts
 
 ### Idempotency Key

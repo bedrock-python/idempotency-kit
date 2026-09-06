@@ -2,7 +2,14 @@
 
 from pydantic import BaseModel, Field
 
-from .core.constants import DEFAULT_TTL_MINUTES, MAX_TTL_SECONDS, MIN_TTL_SECONDS
+from .core.constants import (
+    DEFAULT_IN_FLIGHT_LEASE_SECONDS,
+    DEFAULT_IN_FLIGHT_MODE,
+    DEFAULT_TTL_MINUTES,
+    MAX_TTL_SECONDS,
+    MIN_TTL_SECONDS,
+    InFlightMode,
+)
 
 
 class BaseIdempotencySettings(BaseModel):
@@ -22,4 +29,15 @@ class BaseIdempotencySettings(BaseModel):
     operation_ttls: dict[str, int] = Field(
         default_factory=dict,
         description="Operation-specific TTLs in seconds (overrides decorator and default)",
+    )
+    in_flight: InFlightMode = Field(
+        default=DEFAULT_IN_FLIGHT_MODE,
+        description=(
+            "What a second caller gets while the first one's action is still running under the same key: "
+            "wait for its result, raise IdempotencyInProgressError, or run the action too"
+        ),
+    )
+    in_flight_lease_seconds: int = Field(
+        default=DEFAULT_IN_FLIGHT_LEASE_SECONDS,
+        description="How long an in-flight reservation is held before it counts as abandoned (30 seconds)",
     )

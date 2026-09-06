@@ -7,6 +7,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from idempotency_kit.core.decorators.aio.idempotent import async_idempotent
+from idempotency_kit.core.exceptions import IdempotencyInProgressError
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
 
 
@@ -245,3 +246,20 @@ async def test__decorator__uninspectable_signature__still_reads_the_key_from_kwa
     # Assert
     assert result == "ok"
     mock_coordinator.coordinate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test__decorator__key_in_flight__lets_the_refusal_through(
+    mock_coordinator: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """A second caller refused by the coordinator is refused by the decorated function too; it is the caller's 409."""
+    # Arrange
+    mock_coordinator.coordinate.side_effect = IdempotencyInProgressError("test.op", "test-key")
+
+    @async_idempotent(operation="test.op", adapter=mock_adapter)
+    async def my_func(*, idempotency_key: str | None = None, coord: AsyncIdempotencyCoordinator) -> str:
+        return "not used"
+
+    # Act & Assert
+    with pytest.raises(IdempotencyInProgressError):
+        await my_func(idempotency_key="test-key", coord=mock_coordinator)
