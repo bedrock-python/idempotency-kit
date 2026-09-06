@@ -32,7 +32,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --group dev
-      - run: uv run pytest -m unit
+      - run: uv run pytest -m unit --cov=idempotency_kit --cov-report=xml
+      - uses: codecov/codecov-action@v7
+        if: matrix.python-version == '3.13'
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: unit
+        continue-on-error: true
 
   test-integration:
     name: Integration tests
@@ -47,6 +54,7 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+          flags: integration
         continue-on-error: true
 
   # Sentinel job — use this as the single required status check in branch protection.
