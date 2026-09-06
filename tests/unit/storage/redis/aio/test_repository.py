@@ -1,6 +1,8 @@
 """Unit tests for Redis repository."""
 
+import re
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import metadata
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
@@ -281,6 +283,24 @@ async def test_repository_import_error() -> None:
         pytest.raises(ImportError, match="requires redis"),
     ):
         RedisAsyncIdempotencyRepository(MagicMock())
+
+
+@pytest.mark.asyncio
+async def test_repository_import_error_names_the_declared_extra() -> None:
+    """The install hint has to name an extra this distribution actually declares."""
+    import idempotency_kit.infra.storage.redis.aio.repository as repo_module  # noqa: PLC0415
+
+    with (
+        patch.object(repo_module, "_HAS_ORJSON", False),
+        pytest.raises(ImportError) as exc_info,
+    ):
+        RedisAsyncIdempotencyRepository(MagicMock())
+
+    message = str(exc_info.value)
+    named_extra = re.search(r"idempotency-kit\[([^\]]+)\]", message)
+    assert named_extra is not None
+    assert named_extra.group(1) in (metadata("idempotency-kit").get_all("Provides-Extra") or [])
+    assert "redis-client-kit" not in message
 
 
 @pytest.mark.asyncio

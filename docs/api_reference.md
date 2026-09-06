@@ -66,7 +66,7 @@ Interface for metrics collection.
 Redis implementation of the repository protocol.
 
 - **Constructor**:
-  - `redis` (AsyncRedisClient): Instance of `redis-client-kit` client.
+  - `redis` (`redis.asyncio.Redis`): Any async Redis client, including a subclass such as an instrumented or fake one.
   - `key_prefix` (str, default: "idempotency:"): Prefix for all Redis keys. (**keyword-only**)
   - `metrics` (IdempotencyMetricsProtocol, optional): Metrics collector. (**keyword-only**)
 

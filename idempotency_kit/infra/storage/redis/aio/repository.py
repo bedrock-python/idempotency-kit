@@ -61,8 +61,8 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
         """
         if not _HAS_REDIS or not _HAS_ORJSON:
             raise ImportError(
-                "RedisAsyncIdempotencyRepository requires redis-client-kit and orjson. "
-                "Install them with: pip install idempotency-kit[redis-aio]"
+                "RedisAsyncIdempotencyRepository requires redis and orjson. "
+                "Install them with: pip install idempotency-kit[redis]"
             )
         self._redis = redis
         self._key_prefix = key_prefix

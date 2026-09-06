@@ -11,7 +11,7 @@ This is the innermost layer. It contains:
 - **Domain Services**: Business logic for creating and validating idempotency records (`IdempotencyDomainService`).
 - **Exceptions**: Domain-specific error classes.
 
-The core domain has **minimal dependencies** (Pydantic for models and validation). Infrastructure layer adds Redis integration via optional `[redis-aio]` extra and uses `orjson` for fast serialization.
+The core domain has **minimal dependencies** (Pydantic for models and validation). Infrastructure layer adds Redis integration via optional `[redis]` extra and uses `orjson` for fast serialization.
 
 ### 2. Infrastructure Layer (`idempotency_kit.infra`)
 This layer contains concrete implementations of the protocols defined in the Core layer.
