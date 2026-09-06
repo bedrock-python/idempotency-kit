@@ -118,10 +118,15 @@ The library provides `IdempotencyMetricsProtocol` for observability:
 - `record_bulk_hit` - multiple hits in bulk operation
 - `record_bulk_miss` - multiple misses in bulk operation
 
-Wire metrics via repository constructor:
+Each metric has one owner, so a single collector can be handed to both layers without
+double counting: the coordinator records hit, miss, collision and the latency of `get` and
+`save`; the repository records errors, the bulk hit and miss counts of `get_many`, and the
+latency of `delete` and `get_many`.
 
 ```python
-repo = RedisAsyncIdempotencyRepository(redis, metrics=PrometheusMetrics())
+metrics = PrometheusMetrics()
+repo = RedisAsyncIdempotencyRepository(redis, metrics=metrics)
+coordinator = AsyncIdempotencyCoordinator(repo, IdempotencyDomainService(), metrics=metrics)
 ```
 
 The library follows the **Idempotency Key Pattern**:

@@ -58,13 +58,14 @@ Four nouns and one flow.
   `PydanticResultAdapter(model_class)`, `JsonResultAdapter()`, `VoidResultAdapter()`.
 * **`AsyncIdempotencyCoordinator`** — the flow: read the record, decode it, return it if it
   is there; otherwise run the action, encode the result, write it under `SET NX`, and on a
-  collision re-read and return the winner's result instead. It swallows every storage and
+  collision re-read and return the winner's result instead. A record whose `expires_at`
+  has passed is a miss even if the repository handed it back. It swallows every storage and
   decode failure and degrades to running the action, which is the deliberate trade of
   exactly-once for availability.
 
 `IdempotencyDomainService` sits between the coordinator and the record: it applies the TTL
 bounds and turns Pydantic validation errors into `IdempotencyValidationError`.
-`@async_idempotent` is the same flow as a decorator — it finds the key in the call's keyword
+`@async_idempotent` is the same flow as a decorator — it finds the key in the call's
 arguments and the coordinator in the call's arguments or on `self`, then delegates.
 
 The storage key is `{key_prefix}{operation}:{idempotency_key}`, which is why neither part
@@ -106,9 +107,10 @@ class CreateOrder:
         return OrderDTO.from_entity(order)
 ```
 
-`idempotency_key` is keyword-only on purpose: the decorator reads it out of `**kwargs` and
-nowhere else. `infra_param="coordinator"` names the attribute rather than leaving the
-decorator to find a coordinator by type.
+`idempotency_key` is keyword-only on purpose: nothing else can land in it by position, and
+the call site has to name it. The decorator reads it from the keyword arguments, or from the
+positional ones when the parameter can be passed that way. `infra_param="coordinator"` names
+the attribute rather than leaving the decorator to find a coordinator by type.
 
 The same call without the decorator — the five leading arguments are positional-only, and
 everything after them is forwarded to the action:
@@ -131,8 +133,8 @@ result = await coordinator.coordinate(
 | Name | Signature | What it is |
 |---|---|---|
 | `async_idempotent` | `(operation, adapter, ttl_seconds=None, key_param="idempotency_key", infra_param=None)` | decorator for an async function or method |
-| `AsyncIdempotencyCoordinator` | `(repository, domain_service, operation_ttls=None, metrics=None)` | the flow; `operation_ttls` is `dict[str, int]` in seconds |
-| `IdempotencyDomainService` | `(*, default_ttl_minutes=30, min_ttl_seconds=60, max_ttl_seconds=86400)` | record factory and TTL bounds; keyword-only |
+| `AsyncIdempotencyCoordinator` | `(repository, domain_service, operation_ttls=None, metrics=None, enabled=True)` | the flow; `operation_ttls` is `dict[str, int]` in seconds; `enabled=False` runs the action and nothing else |
+| `IdempotencyDomainService` | `(*, default_ttl_minutes=60, min_ttl_seconds=60, max_ttl_seconds=2592000)` | record factory and TTL bounds; keyword-only, defaults from `core.constants` |
 | `IdempotencyRecord` | frozen Pydantic model | the cached result |
 | `IdempotencyIdentifiers` | Pydantic model | `operation` + `idempotency_key`, and the rules they obey |
 | `AsyncIdempotencyRepository` | runtime-checkable `Protocol` | storage contract |
@@ -160,7 +162,7 @@ result = await coordinator.coordinate(
 |---|---|---|
 | `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, **kwargs)` | `T` | never raises for storage or decode trouble |
 | `IdempotencyDomainService.create_record(operation, idempotency_key, result, *, ttl_minutes=None)` | `IdempotencyRecord` | raises `IdempotencyInvalidTTLError`, `IdempotencyValidationError` |
-| `IdempotencyDomainService.validate_record(record)` | `None` | raises `IdempotencyRecordExpiredError`; nothing in the library calls it |
+| `IdempotencyDomainService.validate_record(record)` | `None` | raises `IdempotencyRecordExpiredError`; the coordinator calls it on every record it reads |
 
 ### Record
 
@@ -199,12 +201,18 @@ and `record_bulk_miss(operation, count)`. `PrometheusIdempotencyMetrics(prefix=N
 `idempotency_operations_total{operation,status}` and
 `idempotency_operation_duration_seconds{operation,method}`.
 
+Each metric has one owner, so the same collector can go to both layers: the coordinator
+records hit, miss, collision and the latency of `get` and `save`; the repository records
+errors, the bulk hit and miss counts of `get_many`, and the latency of `delete` and
+`get_many`.
+
 ### Settings and Dishka
 
 `BaseIdempotencySettings` is a plain Pydantic model with `enabled=True`, `key_prefix`
 (required, no default), `metrics_enabled=False`, `default_ttl_minutes=60`,
-`min_ttl_seconds=1`, `max_ttl_seconds=2592000` and `operation_ttls={}`. It satisfies
-`IdempotencySettingsProtocol`, which is what the providers ask for.
+`min_ttl_seconds=60`, `max_ttl_seconds=2592000` and `operation_ttls={}` — the three TTL
+fields default to the `core.constants` values, which is also what `IdempotencyDomainService`
+uses. It satisfies `IdempotencySettingsProtocol`, which is what the providers ask for.
 
 ```python
 from dishka import make_async_container
@@ -227,6 +235,8 @@ container = make_async_container(
 All three are `Scope.APP`. `IdempotencyProvider` gives one metrics collector to the whole
 process — `PrometheusIdempotencyMetrics` when `settings.metrics_enabled`, a no-op otherwise.
 Another backend goes in with `@provide(override=True)` in a provider listed after it.
+`settings.enabled` reaches the coordinator: `False` makes it a pass-through. A settings
+object written before that field existed is read as enabled.
 
 ## Rules that hold or break the code
 
@@ -239,17 +249,19 @@ Another backend goes in with `@provide(override=True)` in a provider listed afte
    execute, the loser's `save` collides, and it re-reads and returns the winner's record.
    The callers see one result; the side effects happened twice. Make the action safe to run
    twice — a database upsert, an outbox row keyed by the same key — or take your own lock.
-3. **The decorator reads the key from keyword arguments only.** `kwargs.get(key_param)`.
-   Passed positionally, the key is invisible, the function runs unprotected, and nothing is
-   logged. Declare the parameter keyword-only.
+3. **Declare the key keyword-only anyway.** The decorator reads `key_param` from the
+   keyword arguments, and from the positional arguments when the parameter can be passed
+   that way. Keyword-only is still the shape to write: nothing can land in it by position,
+   and the call site has to name it.
 4. **A falsy key means no idempotency.** `None` and `""` both short-circuit straight to the
    action, in the decorator and in `coordinate()`.
-5. **A coordinator the decorator cannot find means no idempotency, silently.** It looks for
+5. **A coordinator the decorator cannot find means no idempotency.** It looks for
    `infra_param` by name in `kwargs` then as an attribute of the first positional argument,
    then for an `AsyncIdempotencyCoordinator` by type in `kwargs`, in `args`, and in the
-   instance dictionary of every positional argument. Finding none, it just calls the
-   function — no exception, no log line. Pass `infra_param=` so a renamed attribute fails
-   loudly in review instead of quietly at runtime.
+   instance dictionary of every positional argument. Finding none, it logs a `WARNING` from
+   `idempotency_kit.core.decorators.aio.idempotent` and calls the function anyway — the
+   operation stays available, unprotected. Pass `infra_param=` so a renamed attribute is one
+   grep away, and alert on that warning.
 6. **`coordinate()` never raises for storage trouble.** A Redis failure on read is counted
    as `storage_get_error` and treated as a miss; a failure on write is `storage_save_error`
    and the fresh result is returned uncached. Availability over exactly-once, deliberately.
@@ -267,19 +279,19 @@ Another backend goes in with `@provide(override=True)` in a provider listed afte
 10. **`operation_ttls` wins over the decorator, and a zero there is not a value.** The
     coordinator resolves `self._operation_ttls.get(operation) or ttl_seconds`, so an entry
     of `0` falls through to the decorator's number rather than meaning "no TTL".
-11. **The domain service's bounds decide what is storable, and the shipped settings widen
-    them.** `IdempotencyDomainService()` alone is 30 minutes by default, floor 60 seconds,
-    ceiling 86400. `BaseIdempotencySettings` defaults to 60 minutes, floor 1 second, ceiling
-    30 days, and the Dishka provider builds the service from those. Out of range raises
+11. **The domain service's bounds decide what is storable.** `IdempotencyDomainService()`
+    and `BaseIdempotencySettings` agree on them: 60 minutes by default, floor 60 seconds,
+    ceiling 30 days, all three from `idempotency_kit.core.constants`. Out of range raises
     `IdempotencyInvalidTTLError`, which the coordinator catches: the operation is simply not
     cached, and the caller gets its result anyway.
 12. **Neither identifier may contain a colon**, both are stripped of surrounding whitespace,
     and the lengths are 100 for `operation` and 255 for `idempotency_key`. The Redis
     repository re-validates on every call, so an over-long key raises there too.
-13. **`PydanticResultAdapter` cannot represent an absent result.** `encode` returns `None`
-    for a falsy value and `decode` raises on a falsy payload, so a function that may return
-    `None` stores `null` and then fails to decode it forever — rule 7, permanently. Use
-    `VoidResultAdapter` when the action returns `None` and `JsonResultAdapter` when it may.
+13. **`PydanticResultAdapter` cannot represent an absent result.** `encode` raises
+    `IdempotencyValidationError` when handed `None` rather than storing a `null` it could
+    never decode again; the coordinator counts that as `record_validation_error`, logs it,
+    and leaves the operation uncached. Use `VoidResultAdapter` when the action returns
+    `None` and `JsonResultAdapter` when it may.
 14. **What is stored has to be a JSON value.** `IdempotencyRecord.result` is Pydantic's
     `JsonValue` and `JsonResultAdapter` passes the value through untouched, so a `datetime`,
     a `Decimal` or a `set` fails record validation, is logged as
@@ -293,31 +305,35 @@ Another backend goes in with `@provide(override=True)` in a provider listed afte
 17. **`PrometheusIdempotencyMetrics` is one instance per process.** It registers its
     collectors in the constructor; a second instance with the same prefix raises from
     `prometheus_client`.
-18. **Both layers count.** The repository and the coordinator each record hit, miss and
-    latency, so one collector shared between them — which is what the Dishka providers wire
-    — counts every coordinator-driven get twice.
+18. **Each metric has one owner.** The coordinator records hit, miss, collision and the
+    latency of `get` and `save`; the repository records errors, the bulk hit and miss counts
+    of `get_many`, and the latency of `delete` and `get_many`. One collector shared between
+    them — which is what the Dishka providers wire — counts every operation once.
 19. **Async only.** There is no sync mirror, and no `__init__.py` name that gives you one.
+20. **`enabled=False` switches the whole thing off.** The coordinator runs the action and
+    nothing else: no read, no write, no metric. The Dishka providers pass `settings.enabled`
+    through to it.
 
 ## Common mistakes
 
 ```python
-# WRONG — the key arrives positionally, so the decorator never sees it and the
-# function runs unprotected on every call
-@async_idempotent(operation="order.create", adapter=PydanticResultAdapter(OrderDTO))
-async def execute(self, dto: CreateOrderDTO, idempotency_key: str | None = None) -> OrderDTO: ...
+# WRONG — infra_param names an attribute that no longer exists, so no coordinator is
+# found: the call runs unprotected and only a WARNING says so
+class CreateOrder:
+    def __init__(self, idempotency: AsyncIdempotencyCoordinator) -> None:
+        self._idempotency = idempotency
 
-await use_case.execute(dto, key)
+    @async_idempotent(operation="order.create", adapter=..., infra_param="coordinator")
+    async def execute(self, dto: CreateOrderDTO, *, idempotency_key: str | None = None) -> OrderDTO: ...
 
-# RIGHT — keyword-only, so it cannot be passed any other way
-@async_idempotent(operation="order.create", adapter=PydanticResultAdapter(OrderDTO))
-async def execute(self, dto: CreateOrderDTO, *, idempotency_key: str | None = None) -> OrderDTO: ...
-
-await use_case.execute(dto, idempotency_key=key)
+# RIGHT — name the attribute that is actually there
+    @async_idempotent(operation="order.create", adapter=..., infra_param="_idempotency")
+    async def execute(self, dto: CreateOrderDTO, *, idempotency_key: str | None = None) -> OrderDTO: ...
 ```
 
 ```python
-# WRONG — a Pydantic adapter on an action that may return nothing: the record
-# stores null, decode raises, and the action re-runs on every replay
+# WRONG — a Pydantic adapter on an action that may return nothing: the adapter refuses
+# to encode the None, so the operation is never cached and the action re-runs every time
 @async_idempotent(operation="user.deactivate", adapter=PydanticResultAdapter(UserDTO))
 async def deactivate(self, *, idempotency_key: str | None = None) -> UserDTO | None: ...
 
@@ -377,7 +393,7 @@ All derive from `IdempotencyError`, which is exported alongside them.
 |---|---|---|
 | `IdempotencyError` | `(message)` | the base, and what a corrupted stored payload raises |
 | `IdempotencyKeyCollisionError` | `(operation, key)` | `save` found the key already there; `key` is a `str`, or a `list[str]` from `save_many`. Carries `.operation` and `.key` |
-| `IdempotencyRecordExpiredError` | `(operation, key)` | `validate_record` was given an expired record. Nothing in the library calls it — it is for your own code |
+| `IdempotencyRecordExpiredError` | `(operation, key)` | `validate_record` was given an expired record. The coordinator raises it internally and turns it into a miss; through the repository or your own call to `validate_record` you meet it directly |
 | `IdempotencyStorageError` | `(message, operation=None, original_error=None)` | the backend failed. Carries `.operation` and `.original_error` |
 | `IdempotencyValidationError` | `(message, errors=None)` | an identifier or a result failed validation. `.errors` holds the Pydantic error list when there is one |
 | `IdempotencyInvalidTTLError` | `(ttl_seconds, min_ttl, max_ttl)` | the TTL is outside the domain service's range. Carries all three |

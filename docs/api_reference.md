@@ -29,13 +29,14 @@ A frozen Pydantic model representing an idempotency result. Inherits from `Idemp
 Service for creating and validating records.
 
 - **Constructor** (Parameters are **keyword-only**):
-  - `default_ttl_minutes` (int, default: 30): Default TTL in minutes. Must be >= 1.
+  - `default_ttl_minutes` (int, default: 60): Default TTL in minutes. Must be >= 1.
   - `min_ttl_seconds` (int, default: 60): Minimum allowed TTL. Must be >= 1.
-  - `max_ttl_seconds` (int, default: 86400): Maximum allowed TTL (24 hours). Must be >= `min_ttl_seconds`.
+  - `max_ttl_seconds` (int, default: 2592000): Maximum allowed TTL (30 days). Must be >= `min_ttl_seconds`.
+  - *Note*: These three defaults live in `idempotency_kit.core.constants` and are also the field defaults of `BaseIdempotencySettings`.
   - *Note*: Constructor validates that `default_ttl_minutes` (converted to seconds) is within the `[min_ttl_seconds, max_ttl_seconds]` range.
 - **Methods**:
   - `create_record(operation, idempotency_key, result, *, ttl_minutes=None)`: Creates a new `IdempotencyRecord` with validation and TTL management.
-  - `validate_record(record)`: Validates that a record is still usable (not expired).
+  - `validate_record(record)`: Validates that a record is still usable, raising `IdempotencyRecordExpiredError` if not. The coordinator calls it on every record it reads.
 
 ### AsyncIdempotencyRepository (Protocol)
 Interface for idempotency storage.
@@ -59,6 +60,9 @@ Interface for metrics collection.
   - `record_latency(operation, method, duration_seconds)`
   - `record_bulk_hit(operation, count)`: For bulk operations.
   - `record_bulk_miss(operation, count)`: For bulk operations.
+- **Who records what**: the coordinator records hit, miss, collision and the latency of `get` and `save`; the repository
+  records errors, the bulk hit and miss counts of `get_many`, and the latency of `delete` and `get_many`. One collector
+  handed to both — which is what the Dishka providers do — therefore counts each operation once.
 
 ## Infrastructure Layer
 
