@@ -8,6 +8,14 @@ class IdempotencySettingsProtocol(Protocol):
     """Protocol for idempotency settings."""
 
     @property
+    def enabled(self) -> bool:
+        """Whether the shipped coordinator applies idempotency at all.
+
+        A settings object without the attribute is read as enabled.
+        """
+        ...
+
+    @property
     def key_prefix(self) -> str:
         """Key prefix for Redis."""
         ...

@@ -31,4 +31,7 @@ class AsyncIdempotencyCoordinatorProvider(Provider):
             domain_service=domain_service,
             operation_ttls=settings.operation_ttls,
             metrics=metrics,
+            # Read defensively: settings objects written against the protocol before
+            # ``enabled`` was part of it stay valid, and they mean enabled.
+            enabled=getattr(settings, "enabled", True),
         )

@@ -11,7 +11,7 @@ This is the innermost layer. It contains:
 - **Domain Services**: Business logic for creating and validating idempotency records (`IdempotencyDomainService`).
 - **Exceptions**: Domain-specific error classes.
 
-The core domain has **minimal dependencies** (Pydantic for models and validation). Infrastructure layer adds Redis integration via optional `[redis-aio]` extra and uses `orjson` for fast serialization.
+The core domain has **minimal dependencies** (Pydantic for models and validation). Infrastructure layer adds Redis integration via optional `[redis]` extra and uses `orjson` for fast serialization.
 
 ### 2. Infrastructure Layer (`idempotency_kit.infra`)
 This layer contains concrete implementations of the protocols defined in the Core layer.
@@ -118,10 +118,15 @@ The library provides `IdempotencyMetricsProtocol` for observability:
 - `record_bulk_hit` - multiple hits in bulk operation
 - `record_bulk_miss` - multiple misses in bulk operation
 
-Wire metrics via repository constructor:
+Each metric has one owner, so a single collector can be handed to both layers without
+double counting: the coordinator records hit, miss, collision and the latency of `get` and
+`save`; the repository records errors, the bulk hit and miss counts of `get_many`, and the
+latency of `delete` and `get_many`.
 
 ```python
-repo = RedisAsyncIdempotencyRepository(redis, metrics=PrometheusMetrics())
+metrics = PrometheusMetrics()
+repo = RedisAsyncIdempotencyRepository(redis, metrics=metrics)
+coordinator = AsyncIdempotencyCoordinator(repo, IdempotencyDomainService(), metrics=metrics)
 ```
 
 The library follows the **Idempotency Key Pattern**:

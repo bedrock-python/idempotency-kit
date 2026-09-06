@@ -157,17 +157,17 @@ await repo.get("order.create", "abc123")  # Different record
 How long the cached result should be kept:
 
 ```python
-# Default: 30 minutes
+# Default: 60 minutes
 record = service.create_record("op", "key", result)
 
-# Custom TTL: 1 hour
-record = service.create_record("op", "key", result, ttl_minutes=60)
+# Custom TTL: 5 minutes
+record = service.create_record("op", "key", result, ttl_minutes=5)
 
 # Service configuration
 service = IdempotencyDomainService(
-    default_ttl_minutes=30,  # Default TTL
-    min_ttl_seconds=60,      # Minimum: 1 minute
-    max_ttl_seconds=86400    # Maximum: 24 hours
+    default_ttl_minutes=60,    # Default TTL
+    min_ttl_seconds=60,        # Minimum: 1 minute
+    max_ttl_seconds=2592000    # Maximum: 30 days
 )
 ```
 

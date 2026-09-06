@@ -184,7 +184,7 @@ The `RedisAsyncIdempotencyRepository` is fully compatible with Redis Cluster. It
 
 ## Metrics and Observability
 
-You can inject a metrics collector into the repository to track hits, misses, collisions, and latency.
+You can inject a metrics collector into the repository and the coordinator to track hits, misses, collisions, errors and latency. Each metric has one owner, so the same collector goes to both without double counting: the coordinator records hit, miss, collision and the latency of `get` and `save`; the repository records errors, the bulk hit and miss counts of `get_many`, and the latency of `delete` and `get_many`.
 
 ```python
 from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol
@@ -218,7 +218,9 @@ class PrometheusMetrics(IdempotencyMetricsProtocol):
         # Increment bulk miss counter
         pass
 
-repo = RedisAsyncIdempotencyRepository(redis, metrics=PrometheusMetrics())
+metrics = PrometheusMetrics()
+repo = RedisAsyncIdempotencyRepository(redis, metrics=metrics)
+coordinator = AsyncIdempotencyCoordinator(repo, IdempotencyDomainService(), metrics=metrics)
 ```
 
 ## Configuration Reference
@@ -227,9 +229,9 @@ repo = RedisAsyncIdempotencyRepository(redis, metrics=PrometheusMetrics())
 
 ```python
 service = IdempotencyDomainService(
-    default_ttl_minutes=30,  # Default: 30 minutes
-    min_ttl_seconds=60,      # Default: 60 seconds (1 min)
-    max_ttl_seconds=86400    # Default: 86400 seconds (24 hours)
+    default_ttl_minutes=60,    # Default: 60 minutes
+    min_ttl_seconds=60,        # Default: 60 seconds (1 min)
+    max_ttl_seconds=2592000    # Default: 2592000 seconds (30 days)
 )
 ```
 
@@ -245,6 +247,7 @@ repo = RedisAsyncIdempotencyRepository(
 
 ### Constants
 
+These three defaults are the same numbers `BaseIdempotencySettings` uses for its own fields.
 See `idempotency_kit.core.constants` for:
 - `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH`
 - `DEFAULT_TTL_MINUTES`, `MIN_TTL_SECONDS`, `MAX_TTL_SECONDS`
@@ -551,6 +554,8 @@ def create_api_container(settings: Settings) -> AsyncContainer:
 ```
 
 Your own providers supply the `Redis` client and the settings object; the settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. To use another metrics backend, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
+
+`enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. A settings object that predates the field is read as enabled.
 
 ## Migration Guide
 

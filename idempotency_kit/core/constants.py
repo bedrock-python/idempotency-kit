@@ -8,11 +8,15 @@ MAX_KEY_LENGTH: int = 255
 MAX_OPERATION_LENGTH: int = 100
 
 # TTL defaults
-# Default TTL in minutes when not explicitly specified.
-DEFAULT_TTL_MINUTES: int = 30
+# The single source for both IdempotencyDomainService's own defaults and the field
+# defaults of BaseIdempotencySettings, so the bounds do not depend on how the service
+# was built.
 
-# Minimum allowed TTL in seconds (1 minute).
+# Default TTL in minutes when not explicitly specified (1 hour).
+DEFAULT_TTL_MINUTES: int = 60
+
+# Minimum allowed TTL in seconds (1 minute); the coordinator floors every TTL at a minute.
 MIN_TTL_SECONDS: int = 60
 
-# Maximum allowed TTL in seconds (24 hours).
-MAX_TTL_SECONDS: int = 86400  # 24 hours
+# Maximum allowed TTL in seconds (30 days).
+MAX_TTL_SECONDS: int = 30 * 24 * 3600

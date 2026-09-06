@@ -43,6 +43,12 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
     """Redis implementation of idempotency repository.
 
     Stores records as JSON with automatic TTL expiration.
+
+    It records only the metrics the coordinator cannot produce for it -- errors, the bulk
+    hit and miss counts of ``get_many``, and the latency of ``delete`` and ``get_many``.
+    Hit, miss, collision and the latency of ``get`` and ``save`` belong to
+    ``AsyncIdempotencyCoordinator``, so that a collector shared by both counts each
+    operation once.
     """
 
     def __init__(
@@ -61,8 +67,8 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
         """
         if not _HAS_REDIS or not _HAS_ORJSON:
             raise ImportError(
-                "RedisAsyncIdempotencyRepository requires redis-client-kit and orjson. "
-                "Install them with: pip install idempotency-kit[redis-aio]"
+                "RedisAsyncIdempotencyRepository requires redis and orjson. "
+                "Install them with: pip install idempotency-kit[redis]"
             )
         self._redis = redis
         self._key_prefix = key_prefix
@@ -134,49 +140,42 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
             IdempotencyStorageError: If Redis operation fails
             IdempotencyError: If data is corrupted
         """
-        start = time.perf_counter()
+        self._validate_inputs(operation, idempotency_key)
+        key = self._make_key(operation, idempotency_key)
         try:
-            self._validate_inputs(operation, idempotency_key)
-            key = self._make_key(operation, idempotency_key)
+            data = await self._redis.get(key)
+        except Exception as e:
+            self._metrics.record_error(operation, type(e).__name__)
+            logger.exception(
+                "Redis error during get",
+                extra={"operation": operation, "key": idempotency_key},
+            )
+            raise IdempotencyStorageError(
+                f"Redis storage failure during get for {operation}",
+                operation=operation,
+                original_error=e,
+            ) from e
+
+        if not data:
+            return None
+
+        record = self._deserialize_record(data, operation, idempotency_key)
+        if record is None:
+            logger.warning(
+                "Found expired record in Redis (TTL mismatch). Deleting it.",
+                extra={"operation": operation, "key": idempotency_key},
+            )
             try:
-                data = await self._redis.get(key)
-            except Exception as e:
-                self._metrics.record_error(operation, type(e).__name__)
-                logger.exception(
-                    "Redis error during get",
-                    extra={"operation": operation, "key": idempotency_key},
-                )
-                raise IdempotencyStorageError(
-                    f"Redis storage failure during get for {operation}",
-                    operation=operation,
-                    original_error=e,
-                ) from e
-
-            if not data:
-                self._metrics.record_miss(operation)
-                return None
-
-            record = self._deserialize_record(data, operation, idempotency_key)
-            if record is None:
-                self._metrics.record_miss(operation)
+                await self._redis.delete(key)
+            except Exception:
                 logger.warning(
-                    "Found expired record in Redis (TTL mismatch). Deleting it.",
+                    "Failed to delete expired record from Redis",
                     extra={"operation": operation, "key": idempotency_key},
+                    exc_info=True,
                 )
-                try:
-                    await self._redis.delete(key)
-                except Exception:
-                    logger.warning(
-                        "Failed to delete expired record from Redis",
-                        extra={"operation": operation, "key": idempotency_key},
-                        exc_info=True,
-                    )
-                return None
+            return None
 
-            self._metrics.record_hit(operation)
-            return record
-        finally:
-            self._metrics.record_latency(operation, "get", time.perf_counter() - start)
+        return record
 
     async def save(
         self,
@@ -193,60 +192,55 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
             IdempotencyStorageError: If Redis operation fails
             IdempotencyError: If serialization fails
         """
-        start = time.perf_counter()
         operation = record.operation
-        try:
-            self._validate_inputs(operation, record.idempotency_key)
-            key = self._make_key(operation, record.idempotency_key)
+        self._validate_inputs(operation, record.idempotency_key)
+        key = self._make_key(operation, record.idempotency_key)
 
-            # Calculate TTL
-            ttl_seconds = math.ceil(record.ttl_seconds)
+        # Calculate TTL
+        ttl_seconds = math.ceil(record.ttl_seconds)
 
-            if ttl_seconds <= 0:
-                self._metrics.record_error(operation, "validation_error")
-                logger.warning(
-                    "Attempted to save already expired record",
-                    extra={"operation": operation, "key": record.idempotency_key},
-                )
-                raise IdempotencyValidationError("Cannot save already expired record")
-
-            # Serialize record
-            try:
-                data = orjson.dumps(record.model_dump(mode="json")) if _HAS_ORJSON else record.model_dump_json()
-            except Exception as e:
-                self._metrics.record_error(operation, "serialization_error")
-                logger.exception(
-                    "Failed to serialize record",
-                    extra={"operation": operation, "key": record.idempotency_key},
-                )
-                raise IdempotencyError("Serialization failed") from e
-
-            # Use SET with NX (only if key doesn't exist) and EX (expiration)
-            try:
-                was_set = await self._redis.set(key, data, ex=ttl_seconds, nx=True)
-            except Exception as e:
-                self._metrics.record_error(operation, type(e).__name__)
-                logger.exception(
-                    "Redis error during save",
-                    extra={"operation": operation, "key": record.idempotency_key},
-                )
-                # In case of Redis error, we cannot guarantee idempotency.
-                raise IdempotencyStorageError(
-                    "Redis storage failure during save",
-                    operation=operation,
-                    original_error=e,
-                ) from e
-
-            if not was_set:
-                self._metrics.record_collision(operation)
-                raise IdempotencyKeyCollisionError(operation, record.idempotency_key)
-
-            logger.debug(
-                "Saved idempotency record",
-                extra={"operation": operation, "key": record.idempotency_key, "ttl_seconds": ttl_seconds},
+        if ttl_seconds <= 0:
+            self._metrics.record_error(operation, "validation_error")
+            logger.warning(
+                "Attempted to save already expired record",
+                extra={"operation": operation, "key": record.idempotency_key},
             )
-        finally:
-            self._metrics.record_latency(operation, "save", time.perf_counter() - start)
+            raise IdempotencyValidationError("Cannot save already expired record")
+
+        # Serialize record
+        try:
+            data = orjson.dumps(record.model_dump(mode="json")) if _HAS_ORJSON else record.model_dump_json()
+        except Exception as e:
+            self._metrics.record_error(operation, "serialization_error")
+            logger.exception(
+                "Failed to serialize record",
+                extra={"operation": operation, "key": record.idempotency_key},
+            )
+            raise IdempotencyError("Serialization failed") from e
+
+        # Use SET with NX (only if key doesn't exist) and EX (expiration)
+        try:
+            was_set = await self._redis.set(key, data, ex=ttl_seconds, nx=True)
+        except Exception as e:
+            self._metrics.record_error(operation, type(e).__name__)
+            logger.exception(
+                "Redis error during save",
+                extra={"operation": operation, "key": record.idempotency_key},
+            )
+            # In case of Redis error, we cannot guarantee idempotency.
+            raise IdempotencyStorageError(
+                "Redis storage failure during save",
+                operation=operation,
+                original_error=e,
+            ) from e
+
+        if not was_set:
+            raise IdempotencyKeyCollisionError(operation, record.idempotency_key)
+
+        logger.debug(
+            "Saved idempotency record",
+            extra={"operation": operation, "key": record.idempotency_key, "ttl_seconds": ttl_seconds},
+        )
 
     async def delete(self, operation: str, idempotency_key: str) -> bool:
         """Delete record from Redis.
