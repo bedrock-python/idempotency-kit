@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.2.0...idempotency-kit-v0.3.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* a second concurrent caller with the same key now waits for the first caller's result instead of running the action too, and coordinate() and the decorator can raise IdempotencyInProgressError. Pass in_flight="run" to the coordinator (or set it on the settings object) to keep the previous behaviour. AsyncIdempotencyRepository gained replace(record); a custom repository needs it, and the coordinator raises TypeError at construction without it unless in_flight="run". IdempotencyRecord gained status, which records written before this change read as "completed".
+
+### Features
+
+* reserve the key while the action runs ([#28](https://github.com/bedrock-python/idempotency-kit/issues/28)) ([0dbf68b](https://github.com/bedrock-python/idempotency-kit/commit/0dbf68b04ce5a54c18f041a35b77d1df2c043fb7)), closes [#26](https://github.com/bedrock-python/idempotency-kit/issues/26)
+* store a fingerprint of the request and refuse a key reused for another ([#30](https://github.com/bedrock-python/idempotency-kit/issues/30)) ([78a9ca2](https://github.com/bedrock-python/idempotency-kit/commit/78a9ca2abb1b5d6a660d1bdf0b31f32a7da256d1)), closes [#27](https://github.com/bedrock-python/idempotency-kit/issues/27)
+
 ## [0.2.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.1.1...idempotency-kit-v0.2.0) (2026-09-06)
 
 
