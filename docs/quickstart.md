@@ -144,6 +144,12 @@ idempotency_key = "create_order"  # Same for all requests
 idempotency_key = str(datetime.now())  # Changes every millisecond
 ```
 
+The key is the whole identity: the same key with a different payload replays the first result.
+To have the payload count, name the parameters that identify the request with
+`fingerprint_params=("dto",)` on `@async_idempotent`; a key reused for a different request then
+raises `IdempotencyKeyReuseError` — see
+[Key reuse and fingerprints](user_guide.md#key-reuse-and-fingerprints) in the User Guide.
+
 ### Operation Name
 
 A string identifying the type of operation:

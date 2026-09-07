@@ -55,6 +55,7 @@ class IdempotencyDomainService:
         result: JsonValue,
         *,
         ttl_minutes: int | None = None,
+        fingerprint: str | None = None,
     ) -> IdempotencyRecord:
         """Create a new idempotency record.
 
@@ -63,6 +64,7 @@ class IdempotencyDomainService:
             idempotency_key: Unique key for this operation
             result: Operation result to cache
             ttl_minutes: Custom TTL in minutes (uses default if None)
+            fingerprint: Fingerprint of the request the result belongs to, if the caller has one
 
         Returns:
             IdempotencyRecord ready to be saved
@@ -84,6 +86,7 @@ class IdempotencyDomainService:
                 idempotency_key=idempotency_key,
                 result=result,
                 ttl_seconds=ttl_seconds,
+                fingerprint=fingerprint,
             )
         except ValidationError as e:
             # Re-map Pydantic validation error to domain validation error with detailed errors
@@ -95,6 +98,7 @@ class IdempotencyDomainService:
         idempotency_key: str,
         *,
         lease_seconds: int,
+        fingerprint: str | None = None,
     ) -> IdempotencyRecord:
         """Create the in-flight reservation for an operation whose action is about to run.
 
@@ -105,6 +109,7 @@ class IdempotencyDomainService:
             operation: Operation name (e.g., 'user.create')
             idempotency_key: Unique key for this operation
             lease_seconds: How long the reservation is held before it counts as abandoned
+            fingerprint: Fingerprint of the request being run, if the caller has one
 
         Returns:
             A pending IdempotencyRecord ready to be saved
@@ -120,6 +125,7 @@ class IdempotencyDomainService:
                 operation=operation,
                 idempotency_key=idempotency_key,
                 lease_seconds=lease_seconds,
+                fingerprint=fingerprint,
             )
         except ValidationError as e:
             raise IdempotencyValidationError(str(e), errors=e.errors()) from e

@@ -11,10 +11,12 @@ from .core.exceptions import (
     IdempotencyInProgressError,
     IdempotencyInvalidTTLError,
     IdempotencyKeyCollisionError,
+    IdempotencyKeyReuseError,
     IdempotencyRecordExpiredError,
     IdempotencyStorageError,
     IdempotencyValidationError,
 )
+from .core.fingerprint import fingerprint_of
 from .core.models.entities import IdempotencyIdentifiers, IdempotencyRecord
 from .core.protocols.adapter import ResultAdapter
 from .core.protocols.aio.repository import AsyncIdempotencyRepository
@@ -31,6 +33,7 @@ __all__ = [
     "IdempotencyInProgressError",
     "IdempotencyInvalidTTLError",
     "IdempotencyKeyCollisionError",
+    "IdempotencyKeyReuseError",
     "IdempotencyMetricsProtocol",
     "IdempotencyRecord",
     "IdempotencyRecordExpiredError",
@@ -42,4 +45,5 @@ __all__ = [
     "ResultAdapter",
     "VoidResultAdapter",
     "async_idempotent",
+    "fingerprint_of",
 ]

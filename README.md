@@ -28,6 +28,7 @@ Ensure operations execute exactly once, even when called multiple times with the
 - **Async First** — built for asyncio applications
 - **Graceful Degradation** — high availability over strict exactly-once
 - **In-flight Reservation** — a retry that arrives while the original is still running waits for its result or gets a 409; the action runs once
+- **Request Fingerprints** — name the parameters that identify a request, and a key reused for a different one is refused instead of replayed
 - **Observability** — built-in metrics (hits, misses, collisions, latency)
 - **Bulk Operations** — efficient `get_many`, `save_many`, `delete_many`
 - **Redis Cluster Compatible** — non-transactional pipelines

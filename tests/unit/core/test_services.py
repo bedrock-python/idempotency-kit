@@ -321,3 +321,17 @@ def test__coordinator_and_settings__agree_on_the_in_flight_defaults() -> None:
         DEFAULT_IN_FLIGHT_LEASE_SECONDS,
     )
     assert (DEFAULT_IN_FLIGHT_MODE, DEFAULT_IN_FLIGHT_LEASE_SECONDS) == ("wait", 30)
+
+
+def test__domain_service__fingerprint__is_stored_on_the_record_and_the_reservation() -> None:
+    """Both factories carry what the caller said the request was."""
+    # Arrange
+    service = IdempotencyDomainService()
+
+    # Act
+    record = service.create_record("op", "key", {"id": 1}, fingerprint="abc")
+    pending = service.create_pending_record("op", "key", lease_seconds=30, fingerprint="abc")
+
+    # Assert
+    assert (record.fingerprint, pending.fingerprint) == ("abc", "abc")
+    assert service.create_record("op", "key", {"id": 1}).fingerprint is None

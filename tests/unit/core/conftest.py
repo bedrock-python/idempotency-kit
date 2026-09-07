@@ -22,12 +22,15 @@ def mock_repo() -> AsyncMock:
 def mock_domain_service() -> MagicMock:
     """Create mock domain service."""
     service = MagicMock()
-    service.create_record.side_effect = lambda operation, idempotency_key, result, ttl_minutes: IdempotencyRecord(
-        operation=operation,
-        idempotency_key=idempotency_key,
-        result=result,
-        created_at=datetime.now(UTC),
-        expires_at=datetime.now(UTC),
+    service.create_record.side_effect = lambda operation, idempotency_key, result, ttl_minutes, fingerprint=None: (
+        IdempotencyRecord(
+            operation=operation,
+            idempotency_key=idempotency_key,
+            result=result,
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
+            fingerprint=fingerprint,
+        )
     )
     return service
 
