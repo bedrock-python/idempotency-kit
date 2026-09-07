@@ -159,6 +159,81 @@ to be migrated. Two things to know before turning the default on across a fleet:
   `in_flight="run"` and switch to `"wait"` once every instance is on the new version, or
   accept that window.
 
+## Key reuse and fingerprints
+
+The key is the identity, and the request body is not part of it: two calls with the same
+`operation` and `idempotency_key` and different payloads replay the first result. For a
+well-behaved client that never happens. It happens with a client that reuses keys by mistake
+— a key derived from the order id, then a second, different operation on the same order — and
+without a fingerprint the library answers such a request with a result for a different
+request, and nothing says so.
+
+Name the parameters that identify the request and the decorator fingerprints them:
+
+```python
+from idempotency_kit import IdempotencyKeyReuseError, PydanticResultAdapter, async_idempotent
+
+class ChargeCard:
+    @async_idempotent(
+        operation="payment.charge",
+        adapter=PydanticResultAdapter(ChargeDTO),
+        fingerprint_params=("dto",),
+    )
+    async def execute(self, dto: ChargeRequest, *, idempotency_key: str | None = None) -> ChargeDTO:
+        return await self._psp.charge(dto)
+```
+
+The named values are bound to the call with defaults applied, turned into their JSON form —
+Pydantic models, dataclasses, UUIDs, datetimes and Decimals included — serialised with sorted
+keys, and hashed with SHA-256. The fingerprint is stored with the record. The same key coming
+back with a different fingerprint raises `IdempotencyKeyReuseError` before the action runs,
+whether the record is completed or still pending under an in-flight reservation, so a
+retry with another payload is refused at once rather than handed someone else's result after
+waiting. The error carries `operation`, `key`, `stored_fingerprint` and `fingerprint`; map
+it to HTTP 422, which is what Stripe does:
+
+```python
+@app.post("/charges")
+async def charge(dto: ChargeRequest, idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    try:
+        return await use_case.execute(dto, idempotency_key=idempotency_key)
+    except IdempotencyKeyReuseError:
+        raise HTTPException(422, detail="this Idempotency-Key was already used for a different request")
+```
+
+Without the decorator, compute the fingerprint with `fingerprint_of` — the same function the
+decorator uses, so both paths agree — and pass it to `coordinate()` as its one keyword:
+
+```python
+from idempotency_kit import fingerprint_of
+
+result = await coordinator.coordinate(
+    "payment.charge",
+    idempotency_key,
+    3600,
+    PydanticResultAdapter(ChargeDTO),
+    self._psp.charge,
+    dto,
+    idempotency_fingerprint=fingerprint_of(dto=dto),
+)
+```
+
+**Either side missing means no comparison.** A record without a fingerprint — written by a
+caller that passed none, or before the field existed — never raises, and a caller without a
+fingerprint gets the key-only behaviour. Nothing changes for anyone who does not opt in, and
+no record needs migrating.
+
+**Fingerprint what identifies the request, not what varies between retries.** A timestamp,
+a trace id or `self` in `fingerprint_params` turns every honest retry into a key reuse. A
+name the function does not have raises `TypeError` at decoration time; a value with no JSON
+form raises `PydanticSerializationError` when the call is made.
+
+**With `in_flight="run"`** the check is on the read, before the action. If the mismatch only
+shows up on the collision after both callers ran, it is logged and counted as `key_reuse`
+and the caller keeps its own result: raising then would make the caller retry a completed
+operation. Every refusal is counted under `record_error(operation, "key_reuse")`; a client
+that reuses keys is worth an alert.
+
 ## Advanced Use Cases
 
 ### Custom TTL
@@ -379,6 +454,7 @@ The library defines several exceptions to handle various idempotency scenarios:
 
 - **`IdempotencyKeyCollisionError`**: Raised by `repository.save()` when you try to save a result for a key that already exists. This typically means another identical request is either being processed or has already finished.
 - **`IdempotencyInProgressError`**: Raised by `coordinator.coordinate()` and the decorator when another call with the same key is still running its action — at once with `in_flight="raise"`, after a whole lease of waiting with `in_flight="wait"`. Map it to HTTP 409.
+- **`IdempotencyKeyReuseError`**: Raised by `coordinator.coordinate()` and the decorator when the record under the key was made for a request with a different fingerprint. Carries both fingerprints. Map it to HTTP 422.
 - **`IdempotencyRecordExpiredError`**: Raised by `service.validate_record()` if the record exists but its TTL has passed.
 - **`IdempotencyInvalidTTLError`**: Raised by `service.create_record()` if the requested TTL is outside the allowed range (configured in `IdempotencyDomainService`).
 - **`IdempotencyValidationError`**: Raised by `service.create_record()` if validation of `operation` or `idempotency_key` fails (e.g., empty string or too long).
@@ -390,8 +466,9 @@ The library defines several exceptions to handle various idempotency scenarios:
 1. **Natural Keys**: Use natural unique identifiers as idempotency keys if possible (e.g., `order_id`, `message_id`).
 2. **Atomic Operations**: Always save the result to the cache *after* the business logic has successfully completed.
 3. **Lease Longer Than the Action**: Set `in_flight_lease_seconds` above the longest the action can take, timeouts and retries included; a reservation that expires mid-run lets the next caller run the action again.
-4. **Pydantic Support**: The library works best with Pydantic models. Use `model_dump(mode="json")` when saving and `**cached.result` when restoring.
-5. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery) than to crash (exactly-once requirement).
+4. **Fingerprint the Request**: Name the parameters that identify the request in `fingerprint_params`, so a key reused by mistake for a different request is refused with `IdempotencyKeyReuseError` rather than answered with the first result.
+5. **Pydantic Support**: The library works best with Pydantic models. Use `model_dump(mode="json")` when saving and `**cached.result` when restoring.
+6. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery) than to crash (exactly-once requirement).
 
 ## Production Examples
 

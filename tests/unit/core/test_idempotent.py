@@ -5,9 +5,11 @@ from typing import Any
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from idempotency_kit.core.decorators.aio.idempotent import async_idempotent
 from idempotency_kit.core.exceptions import IdempotencyInProgressError
+from idempotency_kit.core.fingerprint import fingerprint_of
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
 
 
@@ -263,3 +265,86 @@ async def test__decorator__key_in_flight__lets_the_refusal_through(
     # Act & Assert
     with pytest.raises(IdempotencyInProgressError):
         await my_func(idempotency_key="test-key", coord=mock_coordinator)
+
+
+class _ChargeDTO(BaseModel):
+    amount: int
+    currency: str = "EUR"
+
+
+@pytest.mark.asyncio
+async def test__decorator__fingerprint_params__hands_the_coordinator_the_fingerprint_of_the_named_arguments(
+    mock_coordinator: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """The named parameters, bound to the call, are what the request is."""
+    # Arrange
+    mock_coordinator.coordinate.return_value = "ok"
+    dto = _ChargeDTO(amount=1999)
+
+    @async_idempotent(operation="payment.charge", adapter=mock_adapter, fingerprint_params=("dto", "note"))
+    async def charge(
+        dto: _ChargeDTO, note: str = "", *, idempotency_key: str | None, coord: AsyncIdempotencyCoordinator
+    ) -> str:
+        return "not used"
+
+    # Act
+    result = await charge(dto, idempotency_key="order-42", coord=mock_coordinator)
+
+    # Assert
+    assert result == "ok"
+    mock_coordinator.coordinate.assert_called_once_with(
+        "payment.charge",
+        "order-42",
+        None,
+        mock_adapter,
+        ANY,
+        dto,
+        idempotency_fingerprint=fingerprint_of(dto=dto, note=""),
+        idempotency_key="order-42",
+        coord=mock_coordinator,
+    )
+
+
+@pytest.mark.asyncio
+async def test__decorator__fingerprint_params__an_argument_at_its_default_and_one_left_out_agree(
+    mock_coordinator: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """Two identical requests must not disagree over how the call was spelled."""
+    # Arrange
+    mock_coordinator.coordinate.return_value = "ok"
+
+    @async_idempotent(operation="payment.charge", adapter=mock_adapter, fingerprint_params=("amount", "currency"))
+    async def charge(amount: int, currency: str = "EUR", *, idempotency_key: str | None, coord: Any) -> str:
+        return "not used"
+
+    # Act
+    await charge(5, idempotency_key="k", coord=mock_coordinator)
+    await charge(amount=5, currency="EUR", idempotency_key="k", coord=mock_coordinator)
+
+    # Assert
+    first, second = mock_coordinator.coordinate.call_args_list
+    assert first.kwargs["idempotency_fingerprint"] == second.kwargs["idempotency_fingerprint"]
+
+
+def test__decorator__fingerprint_params__unknown_parameter__raises_at_decoration(mock_adapter: MagicMock) -> None:
+    """A programming error fails at import, not on the first request."""
+    # Act & Assert
+    with pytest.raises(TypeError, match=r"does not have: \['amout'\]"):
+
+        @async_idempotent(operation="payment.charge", adapter=mock_adapter, fingerprint_params=("amout",))
+        async def charge(amount: int, *, idempotency_key: str | None = None) -> str:
+            return "not used"
+
+
+def test__decorator__fingerprint_params__uninspectable_signature__raises_at_decoration(
+    mock_adapter: MagicMock,
+) -> None:
+    # Act & Assert
+    with (
+        patch("inspect.signature", side_effect=ValueError("no signature found")),
+        pytest.raises(TypeError, match="needs a signature"),
+    ):
+
+        @async_idempotent(operation="payment.charge", adapter=mock_adapter, fingerprint_params=("amount",))
+        async def charge(**kwargs: Any) -> str:
+            return "not used"

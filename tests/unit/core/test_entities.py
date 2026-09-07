@@ -1,6 +1,6 @@
 """Unit tests for idempotency entities."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -151,3 +151,38 @@ def test__idempotency_record_pending__lease__creates_an_in_flight_reservation() 
     assert not record.is_expired
     assert 29 < record.ttl_seconds <= 30
     assert record.model_dump(mode="json")["status"] == "pending"
+
+
+def test__idempotency_record__json_written_before_the_fingerprint_existed__decodes_with_none() -> None:
+    """Records already in Redis carry no ``fingerprint``; they read back as records that never raise for one."""
+    # Arrange
+    stored = (
+        '{"operation": "op", "idempotency_key": "key", "result": {"id": 1}, '
+        '"created_at": "2026-09-06T00:00:00Z", "expires_at": "2126-09-06T00:00:00Z", "status": "completed"}'
+    )
+
+    # Act
+    record = IdempotencyRecord.model_validate_json(stored)
+
+    # Assert
+    assert record.fingerprint is None
+    assert record.result == {"id": 1}
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: IdempotencyRecord.create("op", "key", {"id": 1}, ttl_seconds=60, fingerprint="abc"),
+        lambda: IdempotencyRecord.pending("op", "key", lease_seconds=30, fingerprint="abc"),
+    ],
+    ids=["create", "pending"],
+)
+def test__idempotency_record__fingerprint__is_carried_by_both_factories(
+    factory: Callable[[], IdempotencyRecord],
+) -> None:
+    # Act
+    record = factory()
+
+    # Assert
+    assert record.fingerprint == "abc"
+    assert record.model_dump(mode="json")["fingerprint"] == "abc"

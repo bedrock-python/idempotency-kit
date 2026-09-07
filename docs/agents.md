@@ -32,15 +32,17 @@ method that sounds plausible.
 ## Scope
 
 **It does** cache the result of an async operation under a caller-supplied key, replay that
-result on a repeat call, and hold the key while the first caller's action runs: a second
-caller that arrives with the same key in that window waits for the first one's result, or is
-refused, instead of running the action too. It ships a Redis repository, a metrics protocol
-with a Prometheus implementation, a decorator that hides the whole flow, and Dishka providers
-that wire the pieces together.
+result on a repeat call, hold the key while the first caller's action runs — a second caller
+that arrives with the same key in that window waits for the first one's result, or is
+refused, instead of running the action too — and, given a fingerprint of the request, refuse
+a key that comes back for a different request instead of replaying the first one's result.
+It ships a Redis repository, a metrics protocol with a Prometheus implementation, a decorator
+that hides the whole flow, and Dishka providers that wire the pieces together.
 
 **It does not** derive the key — the caller supplies it, and the request body is not part of
-it; it does not roll anything back; it does not cache failures; it does not retry; it has no
-sync API; and it stores nothing but JSON. The reservation is a lease, not a lock: an action
+it unless you name the parameters that fingerprint the request; it does not roll anything
+back; it does not cache failures; it does not retry; it has no sync API; and it stores
+nothing but JSON. The reservation is a lease, not a lock: an action
 that outlives its lease can run twice, and when storage is down the action runs unreserved.
 It is a result cache with an in-flight reservation, not a distributed transaction.
 
@@ -49,9 +51,10 @@ It is a result cache with an in-flight reservation, not a distributed transactio
 Four nouns and one flow.
 
 * **`IdempotencyRecord`** — a frozen Pydantic model: `operation`, `idempotency_key`, the
-  JSON `result`, `created_at`, `expires_at`, and a `status` that is `"completed"` for a
-  stored result and `"pending"` for an in-flight reservation. `expires_at` is what decides
-  whether a record is still a hit; on a pending record it is the lease.
+  JSON `result`, `created_at`, `expires_at`, a `status` that is `"completed"` for a stored
+  result and `"pending"` for an in-flight reservation, and an optional `fingerprint` of the
+  request the record was made for. `expires_at` is what decides whether a record is still a
+  hit; on a pending record it is the lease.
 * **`AsyncIdempotencyRepository`** — the storage protocol: `get` / `save` / `replace` /
   `delete` and the bulk twins of `get`, `save` and `delete`. `save` is a write that fails if
   the key is already there; that failure, `IdempotencyKeyCollisionError`, is how a
@@ -63,10 +66,11 @@ Four nouns and one flow.
 * **`AsyncIdempotencyCoordinator`** — the flow: reserve the key by writing a pending
   record under `SET NX` with the lease as its TTL. If that succeeds, run the action, encode
   the result and `replace` the reservation with the completed record. If it fails, read
-  what holds the key: a completed record is decoded and returned; a pending one means
-  another caller is in flight, and `in_flight` decides — `"wait"` polls until the record
-  arrives, `"raise"` raises `IdempotencyInProgressError`, `"run"` is the old flow of read,
-  run, `SET NX` and adopt the winner's result on a collision. A record whose `expires_at`
+  what holds the key: a record whose `fingerprint` differs from the caller's raises
+  `IdempotencyKeyReuseError`, pending or not; a completed record is decoded and returned; a
+  pending one means another caller is in flight, and `in_flight` decides — `"wait"` polls
+  until the record arrives, `"raise"` raises `IdempotencyInProgressError`, `"run"` is the
+  old flow of read, run, `SET NX` and adopt the winner's result on a collision. A record whose `expires_at`
   has passed is a miss even if the repository handed it back; an expired lease is an
   abandoned reservation. An action that raises deletes its reservation. Storage and decode
   failures are swallowed and the action runs, which is the deliberate trade of exactly-once
@@ -111,6 +115,7 @@ class CreateOrder:
         adapter=PydanticResultAdapter(OrderDTO),
         ttl_seconds=3600,
         infra_param="coordinator",
+        fingerprint_params=("dto",),
     )
     async def execute(self, dto: CreateOrderDTO, *, idempotency_key: str | None = None) -> OrderDTO:
         order = await self._orders.create(dto)
@@ -121,9 +126,11 @@ class CreateOrder:
 the call site has to name it. The decorator reads it from the keyword arguments, or from the
 positional ones when the parameter can be passed that way. `infra_param="coordinator"` names
 the attribute rather than leaving the decorator to find a coordinator by type.
+`fingerprint_params=("dto",)` makes `dto` part of what the key identifies: the same key with
+a different `dto` raises `IdempotencyKeyReuseError` instead of replaying the first order.
 
 The same call without the decorator — the five leading arguments are positional-only, and
-everything after them is forwarded to the action:
+everything after them is forwarded to the action except `idempotency_fingerprint`:
 
 ```python
 result = await coordinator.coordinate(
@@ -133,6 +140,7 @@ result = await coordinator.coordinate(
     PydanticResultAdapter(OrderDTO),
     self.execute_uncached,               # the action
     dto,                                 # *args and **kwargs go to the action
+    idempotency_fingerprint=fingerprint_of(dto=dto),   # optional; None means key only
 )
 ```
 
@@ -142,7 +150,8 @@ result = await coordinator.coordinate(
 
 | Name | Signature | What it is |
 |---|---|---|
-| `async_idempotent` | `(operation, adapter, ttl_seconds=None, key_param="idempotency_key", infra_param=None)` | decorator for an async function or method |
+| `async_idempotent` | `(operation, adapter, ttl_seconds=None, key_param="idempotency_key", infra_param=None, fingerprint_params=None)` | decorator for an async function or method; `fingerprint_params` names the parameters whose values identify the request |
+| `fingerprint_of` | `(**values)` | SHA-256 hex of the JSON form of the named values, keys sorted; what the decorator computes from `fingerprint_params`, for a caller of `coordinate()` |
 | `AsyncIdempotencyCoordinator` | `(repository, domain_service, operation_ttls=None, metrics=None, enabled=True, in_flight="wait", in_flight_lease_seconds=30)` | the flow; `operation_ttls` is `dict[str, int]` in seconds; `enabled=False` runs the action and nothing else; `in_flight` is `"wait"`, `"raise"` or `"run"` |
 | `IdempotencyDomainService` | `(*, default_ttl_minutes=60, min_ttl_seconds=60, max_ttl_seconds=2592000)` | record factory and TTL bounds; keyword-only, defaults from `core.constants` |
 | `IdempotencyRecord` | frozen Pydantic model | the cached result |
@@ -154,7 +163,7 @@ result = await coordinator.coordinate(
 | `VoidResultAdapter` | `()` | stores JSON `null`, decodes back to `None` |
 | `IdempotencyMetricsProtocol` | runtime-checkable `Protocol` | metrics contract |
 | `NoOpIdempotencyMetrics` | `()` | the default collector |
-| `IdempotencyError` and its six subclasses | | see [Errors](#errors) |
+| `IdempotencyError` and its seven subclasses | | see [Errors](#errors) |
 
 ### Not exported from the root
 
@@ -170,9 +179,9 @@ result = await coordinator.coordinate(
 
 | Method | Returns | Notes |
 |---|---|---|
-| `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, **kwargs)` | `T` | never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so |
-| `IdempotencyDomainService.create_record(operation, idempotency_key, result, *, ttl_minutes=None)` | `IdempotencyRecord` | raises `IdempotencyInvalidTTLError`, `IdempotencyValidationError` |
-| `IdempotencyDomainService.create_pending_record(operation, idempotency_key, *, lease_seconds)` | `IdempotencyRecord` | the reservation; not held to the TTL bounds; raises `IdempotencyValidationError` |
+| `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)` | `T` | never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, `IdempotencyKeyReuseError` when the record's fingerprint differs from `idempotency_fingerprint` |
+| `IdempotencyDomainService.create_record(operation, idempotency_key, result, *, ttl_minutes=None, fingerprint=None)` | `IdempotencyRecord` | raises `IdempotencyInvalidTTLError`, `IdempotencyValidationError` |
+| `IdempotencyDomainService.create_pending_record(operation, idempotency_key, *, lease_seconds, fingerprint=None)` | `IdempotencyRecord` | the reservation; not held to the TTL bounds; raises `IdempotencyValidationError` |
 | `IdempotencyDomainService.validate_record(record)` | `None` | raises `IdempotencyRecordExpiredError`; the coordinator calls it on every record it reads |
 
 ### Record
@@ -184,8 +193,9 @@ result = await coordinator.coordinate(
 | `result` | `JsonValue` | whatever the adapter encoded; `null` for a void result |
 | `created_at` / `expires_at` | `datetime` | UTC, set by `create` and `pending`; on a pending record `expires_at` is the lease |
 | `status` | `"pending" \| "completed"` | `"completed"` unless said otherwise, which is how a record written before the field existed reads |
-| `IdempotencyRecord.create(operation, idempotency_key, result, ttl_seconds)` | `IdempotencyRecord` | classmethod; `ttl_seconds` is a `float` here |
-| `IdempotencyRecord.pending(operation, idempotency_key, lease_seconds)` | `IdempotencyRecord` | classmethod; the reservation, `result` is `null` |
+| `fingerprint` | `str \| None` | what the caller said the request was; `None` — also what a record written before the field existed reads as — never raises |
+| `IdempotencyRecord.create(operation, idempotency_key, result, ttl_seconds, fingerprint=None)` | `IdempotencyRecord` | classmethod; `ttl_seconds` is a `float` here |
+| `IdempotencyRecord.pending(operation, idempotency_key, lease_seconds, fingerprint=None)` | `IdempotencyRecord` | classmethod; the reservation, `result` is `null` |
 | `.is_pending` | `bool` | `status == "pending"` |
 | `.is_expired` | `bool` | `now >= expires_at` |
 | `.ttl_seconds` | `float` | remaining, `0.0` once expired |
@@ -228,7 +238,7 @@ second caller records on finding the pending record: a waiter then records a hit
 result arrives, a refused caller records nothing more and raises. In `"run"` mode it is the
 loser's `SET NX` failing after both ran, as before. The error types the coordinator reports
 are `storage_get_error`, `storage_reserve_error`, `storage_save_error`,
-`storage_release_error` and `record_validation_error`.
+`storage_release_error`, `record_validation_error` and `key_reuse`.
 
 ### Settings and Dishka
 
@@ -266,10 +276,17 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
 
 ## Rules that hold or break the code
 
-1. **The key is the whole identity; the arguments are not.** Nothing hashes the request
-   body. Two calls with the same `operation` and `idempotency_key` and different payloads
-   replay the first result. A key must be unique per intended effect, and one client request
-   must not reuse a key across two different operations' worth of work.
+1. **The key is the whole identity; the arguments are not, unless you say which ones are.**
+   Nothing hashes the request body on its own: two calls with the same `operation` and
+   `idempotency_key` and different payloads replay the first result. Name the parameters
+   that identify the request — `fingerprint_params=("dto",)` on the decorator, or
+   `idempotency_fingerprint=fingerprint_of(dto=dto)` on `coordinate()` — and the fingerprint
+   is stored with the record; the same key back with a different fingerprint raises
+   `IdempotencyKeyReuseError` (422 in HTTP terms) instead of replaying, from a completed
+   record and from a pending one alike, before the action runs. Either side without a
+   fingerprint means no comparison: a record written without one, or before the field
+   existed, never raises, and a caller without one gets the key-only behaviour. A key must
+   still be unique per intended effect; the fingerprint is the guard for when it is not.
 2. **A second caller with the same key does not run your business logic while the first is
    in flight — unless you ask for that.** The coordinator reserves the key with a pending
    record (`SET NX`, TTL `in_flight_lease_seconds`, 30 s by default) before the action and
@@ -361,6 +378,19 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
     behaviour, but `JsonResultAdapter` and `VoidResultAdapter` replay the `None`. Roll out
     with `in_flight="run"` and switch once every instance is on the new version, or accept
     the window.
+23. **Fingerprint what identifies the request, not what varies between retries.** The
+    decorator binds the call to the signature with defaults applied, so an argument passed
+    at its default and one left out agree, turns the named values into their JSON form
+    (Pydantic models, dataclasses, UUIDs, datetimes and Decimals included), sorts keys and
+    hashes. A timestamp, a trace id or `self` in `fingerprint_params` makes every honest
+    retry a key reuse. A name the function does not have raises `TypeError` at decoration;
+    a value with no JSON form raises `PydanticSerializationError` at call time.
+24. **`idempotency_fingerprint` is the coordinator's keyword, not the action's.** It is the
+    one keyword `coordinate()` keeps for itself, so an action cannot have a parameter of
+    that name; the decorator passes it only when `fingerprint_params` is set. In
+    `in_flight="run"` mode the fingerprint is checked on the read before the action; a
+    mismatch discovered on the collision after the action is logged and counted as
+    `key_reuse`, and the caller keeps its own result, because the side effect has happened.
 
 ## Common mistakes
 
@@ -425,6 +455,27 @@ coordinator = AsyncIdempotencyCoordinator(repository, service, in_flight_lease_s
 ```
 
 ```python
+# WRONG — a key derived from the order, reused for a second, different request on the same
+# order: the first charge is replayed and nothing says so
+@async_idempotent(operation="payment.charge", adapter=PydanticResultAdapter(ChargeDTO))
+async def charge(self, dto: ChargeDTO, *, idempotency_key: str | None = None) -> ChargeDTO: ...
+
+await charge(ChargeDTO(amount=1999), idempotency_key=f"order-{order.id}")
+await charge(ChargeDTO(amount=5), idempotency_key=f"order-{order.id}")     # -> the 1999 charge
+
+# RIGHT — name what identifies the request, and the second call is refused before it runs
+@async_idempotent(
+    operation="payment.charge", adapter=PydanticResultAdapter(ChargeDTO), fingerprint_params=("dto",)
+)
+async def charge(self, dto: ChargeDTO, *, idempotency_key: str | None = None) -> ChargeDTO: ...
+
+try:
+    return await use_case.charge(dto, idempotency_key=key)
+except IdempotencyKeyReuseError:
+    raise HTTPException(422, detail="this Idempotency-Key was already used for a different request")
+```
+
+```python
 # WRONG — expecting the coordinator to tell you Redis is down
 try:
     result = await coordinator.coordinate("order.create", key, 3600, adapter, action, dto)
@@ -463,13 +514,15 @@ All derive from `IdempotencyError`, which is exported alongside them.
 | `IdempotencyKeyCollisionError` | `(operation, key)` | `save` found the key already there; `key` is a `str`, or a `list[str]` from `save_many`. Carries `.operation` and `.key` |
 | `IdempotencyRecordExpiredError` | `(operation, key)` | `validate_record` was given an expired record. The coordinator raises it internally and turns it into a miss; through the repository or your own call to `validate_record` you meet it directly |
 | `IdempotencyInProgressError` | `(operation, key)` | another call with the same key is still running its action. `coordinate()` and the decorator raise it at once with `in_flight="raise"`, and after a whole lease of waiting with `"wait"`. Carries `.operation` and `.key` |
+| `IdempotencyKeyReuseError` | `(operation, key, stored_fingerprint, fingerprint)` | the record under the key was made for a different request. `coordinate()` and the decorator raise it before the action runs, from a completed record and from a pending one. Carries all four |
 | `IdempotencyStorageError` | `(message, operation=None, original_error=None)` | the backend failed. Carries `.operation` and `.original_error` |
 | `IdempotencyValidationError` | `(message, errors=None)` | an identifier or a result failed validation. `.errors` holds the Pydantic error list when there is one |
 | `IdempotencyInvalidTTLError` | `(ttl_seconds, min_ttl, max_ttl)` | the TTL is outside the domain service's range. Carries all three |
 
-Through `coordinate()` and the decorator only `IdempotencyInProgressError` reaches the
-caller: the collision is resolved into a wait or the winner's result, and every other one is
-logged, counted and swallowed. The rest are the contract of the repository and the domain
+Through `coordinate()` and the decorator only `IdempotencyInProgressError` and
+`IdempotencyKeyReuseError` reach the caller — both are about the request, not about storage:
+the collision is resolved into a wait or the winner's result, and every other one is logged,
+counted and swallowed. The rest are the contract of the repository and the domain
 service, which is where you meet them if you drive those directly.
 
 ## Documentation map
@@ -480,7 +533,7 @@ Fetch a page when the task is the one named beside it.
 |---|---|
 | [Home](index.md) | placing the library — what it is for, the four shapes of caller |
 | [Quick Start](quickstart.md) | the first integration, and what makes a good key |
-| [User Guide](user_guide.md) | in-flight handling and the lease, bulk operations, graceful degradation, Dishka wiring, worked services |
+| [User Guide](user_guide.md) | in-flight handling and the lease, fingerprints and key reuse, bulk operations, graceful degradation, Dishka wiring, worked services |
 | [Architecture](architecture.md) | the layers, the request-flow diagrams, the cluster reasoning |
 | [API Reference](api_reference.md) | an exact field, default or constructor argument |
 | [Testing](testing_conventions.md) | writing tests against this library, or contributing to it |

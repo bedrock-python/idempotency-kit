@@ -4,6 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
+from idempotency_kit.core.fingerprint import fingerprint_of
 from idempotency_kit.core.protocols.adapter import ResultAdapter
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
 
@@ -26,12 +27,40 @@ def _positional_index(func: Callable[..., Any], key_param: str) -> int | None:
     return None
 
 
+def _fingerprint_resolver(
+    func: Callable[..., Any], fingerprint_params: tuple[str, ...] | None
+) -> Callable[[tuple[Any, ...], dict[str, Any]], str] | None:
+    """Build the function that fingerprints a call from the named parameters, or ``None`` when there are none.
+
+    Resolved at decoration time so that a parameter the function does not have, or a
+    signature ``inspect`` cannot describe, fails at import rather than on the first call.
+    """
+    if not fingerprint_params:
+        return None
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError) as e:
+        raise TypeError(f"fingerprint_params needs a signature inspect can describe; {func!r} has none") from e
+    unknown = [name for name in fingerprint_params if name not in signature.parameters]
+    if unknown:
+        raise TypeError(f"fingerprint_params names parameters {func.__qualname__} does not have: {unknown}")
+
+    def resolve(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+        # Defaults applied, so an argument passed at its default and one left out agree.
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return fingerprint_of(**{name: bound.arguments[name] for name in fingerprint_params})
+
+    return resolve
+
+
 def async_idempotent(
     operation: str,
     adapter: ResultAdapter[T],
     ttl_seconds: int | None = None,
     key_param: str = "idempotency_key",
     infra_param: str | None = None,
+    fingerprint_params: tuple[str, ...] | None = None,
 ) -> Callable[[Callable[..., Awaitable[T]]], Callable[..., Awaitable[T]]]:
     """Decorator for asynchronous idempotent operations.
 
@@ -48,10 +77,15 @@ def async_idempotent(
             be passed positionally.
         infra_param: Optional name of the argument or attribute containing AsyncIdempotencyCoordinator.
             If not provided, searches for AsyncIdempotencyCoordinator by type.
+        fingerprint_params: Names of the parameters whose values identify the request. Their
+            bound values, defaults applied, are hashed with ``fingerprint_of`` and stored with
+            the record; a later call under the same key with a different fingerprint raises
+            ``IdempotencyKeyReuseError``. ``None`` means the key alone is the identity.
     """
 
     def decorator(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
         key_index = _positional_index(func, key_param)
+        fingerprint = _fingerprint_resolver(func, fingerprint_params)
 
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> T:
@@ -78,6 +112,8 @@ def async_idempotent(
                 return await func(*args, **kwargs)
 
             # 3. Delegate to coordinator
+            if fingerprint is not None:
+                kwargs = {"idempotency_fingerprint": fingerprint(args, kwargs), **kwargs}
             return await coordinator.coordinate(
                 operation,
                 idempotency_key,

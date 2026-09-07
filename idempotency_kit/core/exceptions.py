@@ -63,3 +63,17 @@ class IdempotencyInProgressError(IdempotencyError):
         self.operation = operation
         self.key = key
         super().__init__(f"Idempotency record for operation '{operation}', key '{key}' is still in flight")
+
+
+class IdempotencyKeyReuseError(IdempotencyError):
+    """Raised when a key is reused for a request with a different fingerprint."""
+
+    def __init__(self, operation: str, key: str, stored_fingerprint: str, fingerprint: str) -> None:
+        self.operation = operation
+        self.key = key
+        self.stored_fingerprint = stored_fingerprint
+        self.fingerprint = fingerprint
+        super().__init__(
+            f"Idempotency key '{key}' for operation '{operation}' was used for a different request: "
+            f"stored fingerprint '{stored_fingerprint}', got '{fingerprint}'"
+        )

@@ -55,6 +55,13 @@ class IdempotencyRecord(IdempotencyIdentifiers):
         description="'pending' while the action runs under a reservation, 'completed' once the result is stored",
     )
 
+    # What the caller said the request was; None means the record carries no fingerprint
+    # and a hit never raises for it.
+    fingerprint: str | None = Field(
+        default=None,
+        description="Fingerprint of the request the result belongs to; a hit with a different one is a key reuse",
+    )
+
     @classmethod
     def create(
         cls,
@@ -62,6 +69,7 @@ class IdempotencyRecord(IdempotencyIdentifiers):
         idempotency_key: str,
         result: JsonValue,
         ttl_seconds: float,
+        fingerprint: str | None = None,
     ) -> Self:
         """Create a new record with calculated expiration."""
         now = datetime.now(UTC)
@@ -71,6 +79,7 @@ class IdempotencyRecord(IdempotencyIdentifiers):
             result=result,
             created_at=now,
             expires_at=now + timedelta(seconds=ttl_seconds),
+            fingerprint=fingerprint,
         )
 
     @classmethod
@@ -79,6 +88,7 @@ class IdempotencyRecord(IdempotencyIdentifiers):
         operation: str,
         idempotency_key: str,
         lease_seconds: float,
+        fingerprint: str | None = None,
     ) -> Self:
         """Create the in-flight reservation for an action that is about to run."""
         now = datetime.now(UTC)
@@ -89,6 +99,7 @@ class IdempotencyRecord(IdempotencyIdentifiers):
             created_at=now,
             expires_at=now + timedelta(seconds=lease_seconds),
             status="pending",
+            fingerprint=fingerprint,
         )
 
     @property

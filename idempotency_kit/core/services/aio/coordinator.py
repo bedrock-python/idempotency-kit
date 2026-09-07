@@ -16,9 +16,11 @@ from idempotency_kit.core.exceptions import (
     IdempotencyInProgressError,
     IdempotencyInvalidTTLError,
     IdempotencyKeyCollisionError,
+    IdempotencyKeyReuseError,
     IdempotencyRecordExpiredError,
     IdempotencyValidationError,
 )
+from idempotency_kit.core.models.entities import IdempotencyRecord
 from idempotency_kit.core.protocols.adapter import ResultAdapter
 from idempotency_kit.core.protocols.aio.repository import AsyncIdempotencyRepository
 from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol, NoOpIdempotencyMetrics
@@ -110,9 +112,15 @@ class AsyncIdempotencyCoordinator:
         action: Callable[..., Awaitable[T]],
         /,
         *args: Any,
+        idempotency_fingerprint: str | None = None,
         **kwargs: Any,
     ) -> T:
         """Coordinate an idempotent operation.
+
+        Everything after the five positional-only arguments goes to the action, except
+        ``idempotency_fingerprint``: what the caller says the request is. It is stored with
+        the record, and a record under the same key with a different fingerprint is a key
+        reuse. ``None`` on either side means no comparison, which is the key-only behaviour.
 
         With ``enabled=False`` the action is simply run: nothing is read, nothing is
         written, and no metric is recorded.
@@ -120,17 +128,18 @@ class AsyncIdempotencyCoordinator:
         Storage and decode trouble never raise: the coordinator degrades to running the
         action. What does raise is ``IdempotencyInProgressError``, when another call with
         the same key is still running its action and ``in_flight`` is ``"raise"``, or
-        ``"wait"`` and a whole lease has passed.
+        ``"wait"`` and a whole lease has passed; and ``IdempotencyKeyReuseError``, when the
+        record under the key was made for a different request.
         """
         if not self._enabled or not idempotency_key:
             return await action(*args, **kwargs)
 
         if self._in_flight == "run":
             return await self._coordinate_unreserved(
-                operation, idempotency_key, ttl_seconds, adapter, action, *args, **kwargs
+                operation, idempotency_key, ttl_seconds, adapter, action, idempotency_fingerprint, *args, **kwargs
             )
 
-        claim = await self._claim(operation, idempotency_key, adapter)
+        claim = await self._claim(operation, idempotency_key, adapter, idempotency_fingerprint)
         if isinstance(claim, _Hit):
             return claim.value
 
@@ -144,7 +153,9 @@ class AsyncIdempotencyCoordinator:
             raise
 
         ttl_minutes = self._resolve_ttl_minutes(operation, ttl_seconds)
-        completed = await self._try_complete(operation, idempotency_key, result, adapter, ttl_minutes)
+        completed = await self._try_complete(
+            operation, idempotency_key, result, adapter, ttl_minutes, idempotency_fingerprint
+        )
         if claim and not completed:
             # Our reservation with no result behind it would make every retry within the
             # lease wait for, or be refused over, a record that is never coming.
@@ -158,12 +169,13 @@ class AsyncIdempotencyCoordinator:
         ttl_seconds: int | None,
         adapter: ResultAdapter[T],
         action: Callable[..., Awaitable[T]],
+        fingerprint: str | None,
         *args: Any,
         **kwargs: Any,
     ) -> T:
         """The flow without a reservation: read, run, ``SET NX``, and adopt the winner's result on a collision."""
         # 1. Try to get from storage
-        hit = await self._try_get_cached(operation, idempotency_key, adapter)
+        hit = await self._try_get_cached(operation, idempotency_key, adapter, fingerprint)
         if isinstance(hit, _Hit):
             return hit.value
 
@@ -172,26 +184,28 @@ class AsyncIdempotencyCoordinator:
 
         # 3. Cache the result
         ttl_minutes = self._resolve_ttl_minutes(operation, ttl_seconds)
-        return await self._try_save_result(operation, idempotency_key, result, adapter, ttl_minutes)
+        return await self._try_save_result(operation, idempotency_key, result, adapter, ttl_minutes, fingerprint)
 
     async def _claim(
         self,
         operation: str,
         idempotency_key: str,
         adapter: ResultAdapter[T],
+        fingerprint: str | None,
     ) -> _Hit[T] | bool:
         """Reserve the key, or replay the record that holds it.
 
         Returns the hit when a completed record is there, ``True`` when the reservation is
         ours, and ``False`` when the key holds nothing usable and the action has to run
         unreserved. Raises ``IdempotencyInProgressError`` for a key another caller holds,
-        at once in ``"raise"`` mode and after a whole lease of waiting in ``"wait"`` mode.
+        at once in ``"raise"`` mode and after a whole lease of waiting in ``"wait"`` mode,
+        and ``IdempotencyKeyReuseError`` for a key that holds a different request.
         """
         deadline = time.monotonic() + self._in_flight_lease_seconds
         read = False
         waiting = False
         while True:
-            reserved = await self._try_reserve(operation, idempotency_key)
+            reserved = await self._try_reserve(operation, idempotency_key, fingerprint)
             if reserved is None:
                 return False
             if reserved:
@@ -200,7 +214,7 @@ class AsyncIdempotencyCoordinator:
                     self._metrics.record_miss(operation)
                 return True
 
-            found = await self._try_get_cached(operation, idempotency_key, adapter)
+            found = await self._try_get_cached(operation, idempotency_key, adapter, fingerprint)
             read = True
             if isinstance(found, _Hit):
                 return found
@@ -239,7 +253,7 @@ class AsyncIdempotencyCoordinator:
             return None
         return max(1, effective_ttl_seconds // 60)
 
-    async def _try_reserve(self, operation: str, idempotency_key: str) -> bool | None:
+    async def _try_reserve(self, operation: str, idempotency_key: str, fingerprint: str | None) -> bool | None:
         """Write the pending record under ``SET NX``.
 
         ``True`` when the reservation is ours, ``False`` when the key is already taken,
@@ -251,6 +265,7 @@ class AsyncIdempotencyCoordinator:
                 operation,
                 idempotency_key,
                 lease_seconds=self._in_flight_lease_seconds,
+                fingerprint=fingerprint,
             )
             await self._repo.save(pending)
         except IdempotencyKeyCollisionError:
@@ -290,11 +305,23 @@ class AsyncIdempotencyCoordinator:
         operation: str,
         idempotency_key: str,
         adapter: ResultAdapter[T],
+        fingerprint: str | None,
     ) -> _Hit[T] | _Lookup:
-        """Fetch and decode the record under the key; a read that fails is ``UNUSABLE``, never an exception."""
+        """Fetch and decode the record under the key.
+
+        A read that fails is ``UNUSABLE``, never an exception; the one exception that does
+        come through is ``IdempotencyKeyReuseError``, which is about the request, not storage.
+        """
         start_time = time.perf_counter()
         try:
-            found = await self._get_and_decode(operation, idempotency_key, adapter)
+            found = await self._get_and_decode(operation, idempotency_key, adapter, fingerprint)
+        except IdempotencyKeyReuseError:
+            self._metrics.record_error(operation, "key_reuse")
+            logger.warning(
+                "Idempotency key reused for a different request",
+                extra={"operation": operation, "idempotency_key": idempotency_key},
+            )
+            raise
         except Exception:
             self._metrics.record_error(operation, "storage_get_error")
             logger.exception(
@@ -322,17 +349,20 @@ class AsyncIdempotencyCoordinator:
         result: T,
         adapter: ResultAdapter[T],
         ttl_minutes: int | None,
+        fingerprint: str | None,
     ) -> T:
         """Try to save result to storage. Handles collisions and errors gracefully."""
         start_time = time.perf_counter()
         try:
-            await self._save_to_repo(operation, idempotency_key, result, adapter, ttl_minutes, replace=False)
+            await self._save_to_repo(
+                operation, idempotency_key, result, adapter, ttl_minutes, fingerprint, replace=False
+            )
             logger.info(
                 "Idempotency result saved",
                 extra={"operation": operation, "idempotency_key": idempotency_key},
             )
         except IdempotencyKeyCollisionError:
-            return await self._handle_collision(operation, idempotency_key, result, adapter)
+            return await self._handle_collision(operation, idempotency_key, result, adapter, fingerprint)
         except (IdempotencyValidationError, IdempotencyInvalidTTLError):
             self._report_unstorable_record(operation, idempotency_key, adapter)
         except Exception:
@@ -349,11 +379,14 @@ class AsyncIdempotencyCoordinator:
         result: T,
         adapter: ResultAdapter[T],
         ttl_minutes: int | None,
+        fingerprint: str | None,
     ) -> bool:
         """Write the result over the reservation; ``False`` when it could not be stored, never an exception."""
         start_time = time.perf_counter()
         try:
-            await self._save_to_repo(operation, idempotency_key, result, adapter, ttl_minutes, replace=True)
+            await self._save_to_repo(
+                operation, idempotency_key, result, adapter, ttl_minutes, fingerprint, replace=True
+            )
         except (IdempotencyValidationError, IdempotencyInvalidTTLError):
             self._report_unstorable_record(operation, idempotency_key, adapter)
             return False
@@ -398,8 +431,9 @@ class AsyncIdempotencyCoordinator:
         operation: str,
         idempotency_key: str,
         adapter: ResultAdapter[T],
+        fingerprint: str | None,
     ) -> _Hit[T] | _Lookup:
-        """Fetch record from repository and decode it safely."""
+        """Fetch record from repository and decode it safely; raises ``IdempotencyKeyReuseError`` on a mismatch."""
         cached = await self._repo.get(operation, idempotency_key)
         if cached is None:
             return _Lookup.ABSENT
@@ -414,9 +448,19 @@ class AsyncIdempotencyCoordinator:
                 extra={"operation": operation, "idempotency_key": idempotency_key},
             )
             return _Lookup.ABSENT
+        # Before the pending check on purpose: a waiter with a different payload is refused
+        # now rather than handed someone else's result later.
+        self._check_fingerprint(cached, fingerprint)
         if cached.is_pending:
             return _Lookup.IN_FLIGHT
         return self._decode_safely(adapter, cached.result, operation, idempotency_key)
+
+    @staticmethod
+    def _check_fingerprint(record: IdempotencyRecord, fingerprint: str | None) -> None:
+        """Raise ``IdempotencyKeyReuseError`` when both sides have a fingerprint and they differ."""
+        if fingerprint is None or record.fingerprint is None or record.fingerprint == fingerprint:
+            return
+        raise IdempotencyKeyReuseError(record.operation, record.idempotency_key, record.fingerprint, fingerprint)
 
     async def _save_to_repo(
         self,
@@ -425,6 +469,7 @@ class AsyncIdempotencyCoordinator:
         result: T,
         adapter: ResultAdapter[T],
         ttl_minutes: int | None,
+        fingerprint: str | None,
         *,
         replace: bool,
     ) -> None:
@@ -434,6 +479,7 @@ class AsyncIdempotencyCoordinator:
             idempotency_key=idempotency_key,
             result=adapter.encode(result),
             ttl_minutes=ttl_minutes,
+            fingerprint=fingerprint,
         )
         if replace:
             await self._repo.replace(record)
@@ -446,6 +492,7 @@ class AsyncIdempotencyCoordinator:
         idempotency_key: str,
         current_result: T,
         adapter: ResultAdapter[T],
+        fingerprint: str | None,
     ) -> T:
         """Handle key collision by trying to fetch the winner's result."""
         self._metrics.record_collision(operation)
@@ -454,9 +501,17 @@ class AsyncIdempotencyCoordinator:
             extra={"operation": operation, "idempotency_key": idempotency_key},
         )
         try:
-            winner = await self._get_and_decode(operation, idempotency_key, adapter)
+            winner = await self._get_and_decode(operation, idempotency_key, adapter, fingerprint)
             if isinstance(winner, _Hit):
                 return winner.value
+        except IdempotencyKeyReuseError:
+            # The action has already run, so raising would make the caller retry a
+            # completed operation. The caller keeps its own result; the reuse is on record.
+            self._metrics.record_error(operation, "key_reuse")
+            logger.warning(
+                "Idempotency key reused for a different request by a concurrent caller; keeping our own result",
+                extra={"operation": operation, "idempotency_key": idempotency_key},
+            )
         except Exception:
             logger.exception(
                 "Failed to fetch concurrent result after collision",

@@ -11,8 +11,10 @@ from idempotency_kit import (
     AsyncIdempotencyCoordinator,
     IdempotencyDomainService,
     IdempotencyKeyCollisionError,
+    IdempotencyKeyReuseError,
     IdempotencyRecord,
     JsonResultAdapter,
+    fingerprint_of,
 )
 from idempotency_kit.infra.storage.redis.aio import RedisAsyncIdempotencyRepository
 
@@ -168,3 +170,38 @@ async def test__coordinator__concurrent_callers_on_real_redis__run_the_action_on
     # Assert
     assert charges == ["ch_1"]
     assert results == [{"charge_id": "ch_1", "amount": 1999}, {"charge_id": "ch_1", "amount": 1999}]
+
+
+@pytest.mark.asyncio
+async def test__coordinator__reused_key_with_a_different_fingerprint_on_real_redis__raises_key_reuse(
+    redis_client: AsyncRedisClient,
+) -> None:
+    """The key that charged 1999 comes back for 5: the caller is told, rather than handed the first charge."""
+    # Arrange
+    coordinator = AsyncIdempotencyCoordinator(RedisAsyncIdempotencyRepository(redis_client), IdempotencyDomainService())
+    key = str(uuid4())
+
+    async def charge_card(amount: int) -> dict[str, int]:
+        return {"amount": amount}
+
+    await coordinator.coordinate(
+        "payment.charge",
+        key,
+        3600,
+        JsonResultAdapter(),
+        charge_card,
+        1999,
+        idempotency_fingerprint=fingerprint_of(amount=1999),
+    )
+
+    # Act & Assert
+    with pytest.raises(IdempotencyKeyReuseError):
+        await coordinator.coordinate(
+            "payment.charge",
+            key,
+            3600,
+            JsonResultAdapter(),
+            charge_card,
+            5,
+            idempotency_fingerprint=fingerprint_of(amount=5),
+        )

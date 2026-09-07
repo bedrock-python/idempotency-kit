@@ -21,9 +21,10 @@ A frozen Pydantic model representing an idempotency result. Inherits from `Idemp
   - `created_at` (datetime): When the record was created.
   - `expires_at` (datetime): When the record will expire. On a pending record this is the in-flight lease.
   - `status` (`"pending" | "completed"`, default `"completed"`): `"pending"` while the action runs under an in-flight reservation, `"completed"` once the result is stored. A record written before the field existed reads as completed.
+  - `fingerprint` (`str | None`, default `None`): Fingerprint of the request the record was made for. A hit with a different one is a key reuse; `None` — also how a record written before the field existed reads — never raises.
 - **Methods**:
-  - `create(operation: str, idempotency_key: str, result: JsonValue, ttl_seconds: float) -> IdempotencyRecord`: Class method to create a new record.
-  - `pending(operation: str, idempotency_key: str, lease_seconds: float) -> IdempotencyRecord`: Class method to create the in-flight reservation; `result` is `null`.
+  - `create(operation: str, idempotency_key: str, result: JsonValue, ttl_seconds: float, fingerprint: str | None = None) -> IdempotencyRecord`: Class method to create a new record.
+  - `pending(operation: str, idempotency_key: str, lease_seconds: float, fingerprint: str | None = None) -> IdempotencyRecord`: Class method to create the in-flight reservation; `result` is `null`.
   - `is_pending`: Property returning `True` for an in-flight reservation.
   - `is_expired`: Property returning `True` if current time is after `expires_at`.
   - `ttl_seconds`: Property returning remaining TTL in seconds.
@@ -38,8 +39,8 @@ Service for creating and validating records.
   - *Note*: These three defaults live in `idempotency_kit.core.constants` and are also the field defaults of `BaseIdempotencySettings`.
   - *Note*: Constructor validates that `default_ttl_minutes` (converted to seconds) is within the `[min_ttl_seconds, max_ttl_seconds]` range.
 - **Methods**:
-  - `create_record(operation, idempotency_key, result, *, ttl_minutes=None)`: Creates a new `IdempotencyRecord` with validation and TTL management.
-  - `create_pending_record(operation, idempotency_key, *, lease_seconds)`: Creates the in-flight reservation. The lease is not held to the TTL bounds; it must be at least a second.
+  - `create_record(operation, idempotency_key, result, *, ttl_minutes=None, fingerprint=None)`: Creates a new `IdempotencyRecord` with validation and TTL management.
+  - `create_pending_record(operation, idempotency_key, *, lease_seconds, fingerprint=None)`: Creates the in-flight reservation. The lease is not held to the TTL bounds; it must be at least a second.
   - `validate_record(record)`: Validates that a record is still usable, raising `IdempotencyRecordExpiredError` if not. The coordinator calls it on every record it reads.
 
 ### AsyncIdempotencyCoordinator
@@ -55,7 +56,21 @@ The flow: reserve the key, run the action, store the result; replay a stored res
   - `in_flight_lease_seconds` (int, default: 30): How long a reservation is held before it counts as abandoned, and the longest a waiting caller waits. Must be at least 1 and longer than the action can take.
   - *Note*: The constructor raises `TypeError` when the repository has no `replace` and `in_flight` is not `"run"`.
 - **Methods**:
-  - `coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, **kwargs)`: Runs the flow and returns the action's result type. Never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so.
+  - `coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)`: Runs the flow and returns the action's result type. Everything after the five positional-only arguments goes to the action except `idempotency_fingerprint`, the fingerprint of the request, which is stored with the record and compared on a hit. Never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, and `IdempotencyKeyReuseError` when the record's fingerprint differs from the caller's.
+
+### async_idempotent
+The same flow as a decorator: it finds the key in the call's arguments and the coordinator in the call's arguments or on `self`, then delegates to `coordinate()`.
+
+- **Parameters**:
+  - `operation` (str): Operation name.
+  - `adapter` (ResultAdapter): Encodes the result for storage and decodes it back.
+  - `ttl_seconds` (int, optional): TTL for the record; the coordinator's `operation_ttls` win over it.
+  - `key_param` (str, default: `"idempotency_key"`): Name of the parameter holding the key. Read from the keyword arguments, or from the positional ones when the parameter can be passed that way.
+  - `infra_param` (str, optional): Name of the argument or attribute holding the coordinator; without it the decorator searches by type.
+  - `fingerprint_params` (tuple[str, ...], optional): Names of the parameters whose bound values, defaults applied, identify the request. Their fingerprint is computed with `fingerprint_of` and passed to `coordinate()` as `idempotency_fingerprint`. A name the function does not have raises `TypeError` at decoration time.
+
+### fingerprint_of
+`fingerprint_of(**values) -> str`: the SHA-256 hex digest of the JSON form of the named values, keys sorted. Pydantic models, dataclasses, UUIDs, datetimes and Decimals are serialised the way Pydantic serialises them; a value with no JSON form raises `pydantic_core.PydanticSerializationError`. It is what the decorator computes from `fingerprint_params`, for a caller of `coordinate()` to use directly.
 
 ### AsyncIdempotencyRepository (Protocol)
 Interface for idempotency storage.
@@ -102,6 +117,7 @@ Redis implementation of the repository protocol.
   - `key` can be a single `str` or a `list[str]` for bulk operations.
 - **`IdempotencyRecordExpiredError(operation, key)`**: Raised when record exists but is expired.
 - **`IdempotencyInProgressError(operation, key)`**: Raised by `coordinate()` and the decorator when another call with the same key is still running its action.
+- **`IdempotencyKeyReuseError(operation, key, stored_fingerprint, fingerprint)`**: Raised by `coordinate()` and the decorator when the record under the key was made for a request with a different fingerprint.
 - **`IdempotencyStorageError(message, operation, original_error)`**: Raised on storage failure.
 - **`IdempotencyValidationError(message, errors=None)`**: Raised for invalid input (e.g. empty key, too long string).
   - `errors` (list, optional): Detailed Pydantic validation errors.
