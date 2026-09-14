@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.3.0...idempotency-kit-v0.4.0) (2026-09-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* AsyncRedisIdempotencyProvider requests redis.asyncio.Redis | RedisCluster, the key redis_client_kit.AsyncRedisClient names. A provider of your own annotated `-> Redis` no longer matches and the container fails at construction with GraphMissingFactoryError; annotate it `-> Redis | RedisCluster`.
+
+### Bug Fixes
+
+* request Redis | RedisCluster in the Dishka provider and read per slot on a cluster ([d31f171](https://github.com/bedrock-python/idempotency-kit/commit/d31f171622ccab208e3324662b00afac22f2d8cf)), closes [#32](https://github.com/bedrock-python/idempotency-kit/issues/32)
+
 ## [0.3.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.2.0...idempotency-kit-v0.3.0) (2026-09-07)
 
 
