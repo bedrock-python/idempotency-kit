@@ -17,9 +17,10 @@ except ImportError:
     _HAS_ORJSON = False
 
 try:
-    from redis.asyncio import Redis as AsyncRedisClient
+    from redis.asyncio import Redis, RedisCluster
 
     _HAS_REDIS = True
+    AsyncRedisClient = Redis | RedisCluster
 except ImportError:
     _HAS_REDIS = False
     AsyncRedisClient = Any  # type: ignore[assignment,misc,valid-type]
@@ -61,7 +62,7 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
         """Initialize repository.
 
         Args:
-            redis: Redis client instance
+            redis: Redis client instance, single-node or cluster
             key_prefix: Prefix for all Redis keys (default: "idempotency:")
             metrics: Metrics collector instance (default: NoOp)
         """
@@ -316,7 +317,7 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
             self._metrics.record_latency(operation, "delete", time.perf_counter() - start)
 
     async def get_many(self, operation: str, idempotency_keys: list[str]) -> dict[str, IdempotencyRecord]:
-        """Retrieve multiple records from Redis using MGET.
+        """Retrieve multiple records from Redis using MGET, one per hash slot on a cluster.
 
         Args:
             operation: Name of the operation
@@ -340,7 +341,11 @@ class RedisAsyncIdempotencyRepository(AsyncIdempotencyRepository):
 
             keys = [self._make_key(operation, key) for key in idempotency_keys]
             try:
-                values = await self._redis.mget(keys)
+                # One MGET cannot span hash slots on a cluster; mget_nonatomic sends one per slot.
+                if isinstance(self._redis, RedisCluster):
+                    values = await self._redis.mget_nonatomic(keys)
+                else:
+                    values = await self._redis.mget(keys)
             except Exception as e:
                 self._metrics.record_error(operation, type(e).__name__)
                 logger.exception(

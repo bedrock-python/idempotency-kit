@@ -105,10 +105,10 @@ Interface for metrics collection.
 Redis implementation of the repository protocol.
 
 - **Constructor**:
-  - `redis` (`redis.asyncio.Redis`): Any async Redis client, including a subclass such as an instrumented or fake one.
+  - `redis` (`redis.asyncio.Redis | RedisCluster`): Any async Redis client, single-node or cluster, including a subclass such as an instrumented or fake one.
   - `key_prefix` (str, default: "idempotency:"): Prefix for all Redis keys. (**keyword-only**)
   - `metrics` (IdempotencyMetricsProtocol, optional): Metrics collector. (**keyword-only**)
-- **Storage**: `SET key value EX ttl NX` for `save`, the same without `NX` for `replace`, `GET` for `get`.
+- **Storage**: `SET key value EX ttl NX` for `save`, the same without `NX` for `replace`, `GET` for `get`, `MGET` for `get_many` — one per hash slot, via `mget_nonatomic`, on a `RedisCluster`.
 
 ## Exceptions
 

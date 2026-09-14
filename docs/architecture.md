@@ -147,6 +147,8 @@ This distinction allows developers to decide whether to fail the request or proc
 
 Bulk operations (`get_many`, `save_many`, `delete_many`) are designed to be efficient by using Redis `MGET` and non-transactional pipelines.
 
+**`MGET` per hash slot**: on a cluster a single `MGET` may not span hash slots — redis-py raises `RedisClusterException` before sending — so with a `RedisCluster` client `get_many` calls `mget_nonatomic`, which issues one `MGET` per slot and returns the values in input order. `delete_many` and the expired-key cleanup rely on the cluster client's own per-slot split of `DEL`.
+
 **Non-transactional pipelines** (`transaction=False`) are used for `save_many` to ensure compatibility with Redis Cluster. In a cluster environment, different keys can map to different hash slots, making standard `MULTI/EXEC` transactions impossible for arbitrary keys. By using a non-transactional pipeline, we send all commands in a single network round-trip while allowing them to be processed independently across different cluster nodes.
 
 ## Metrics and Observability

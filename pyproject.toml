@@ -52,6 +52,7 @@ test = [
     "orjson>=3.11.7,<4.0.0",
     "dishka>=1.0.0",
     "prometheus-client>=0.15.0",
+    "redis-client-kit[providers,settings]>=0.2.0",
 ]
 docs = [
     "zensical>=0.0.37",

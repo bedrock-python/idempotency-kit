@@ -327,7 +327,7 @@ except IdempotencyValidationError as e:
 
 ## Redis Cluster Compatibility
 
-The `RedisAsyncIdempotencyRepository` is fully compatible with Redis Cluster. It uses non-transactional pipelines (`transaction=False`) for bulk operations, allowing keys to be distributed across different hash slots.
+The `RedisAsyncIdempotencyRepository` takes a `redis.asyncio.RedisCluster` as well as a `Redis` and is fully compatible with Redis Cluster. Every write is single-key. `get_many` sends one `MGET` per hash slot on a cluster (redis-py's `mget_nonatomic`), because a single `MGET` cannot span slots. `save_many` uses a non-transactional pipeline (`transaction=False`), allowing keys to be distributed across different hash slots.
 
 **Note on Atomicity**: Since non-transactional pipelines are used, `save_many` is **not atomic** by default. If an error occurs, some records might remain in Redis. Use `rollback_on_error=True` if you need to ensure that either all records are saved or none (the library will manually delete successfully saved records if a failure occurs).
 
@@ -742,7 +742,7 @@ def create_api_container(settings: Settings) -> AsyncContainer:
     )
 ```
 
-Your own providers supply the `Redis` client and the settings object; the settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. To use another metrics backend, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
+Your own providers supply the Redis client and the settings object. The client is requested as `redis.asyncio.Redis | RedisCluster` — the key `redis_client_kit.AsyncRedisClient` names, so `redis_client_kit.providers.AsyncRedisProvider` stands in for `RedisProvider()` above with no adapter in between. A provider of your own must use that exact annotation: Dishka matches keys exactly, and `Redis` alone is a different one. The settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. To use another metrics backend, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
 
 `enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. `in_flight` and `in_flight_lease_seconds` reach the coordinator the same way. A settings object that predates these fields is read as enabled, `"wait"` and 30 seconds.
 

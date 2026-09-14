@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import orjson
 import pytest
 from fakeredis import FakeAsyncRedis as AsyncRedisClient
+from redis.asyncio import RedisCluster
 
 from idempotency_kit import (
     IdempotencyDomainService,
@@ -364,3 +365,22 @@ async def test_save_many_mixed_validation_errors(fake_redis: AsyncRedisClient) -
 
     with pytest.raises(IdempotencyValidationError, match="Bulk validation failed"):
         await repo.save_many([invalid_op, invalid_key])
+
+
+@pytest.mark.asyncio
+async def test__get_many__cluster_client__reads_with_one_mget_per_slot() -> None:
+    """A single MGET cannot span hash slots on a cluster, so the repository asks redis-py for one per slot."""
+    # Arrange
+    record = IdempotencyDomainService().create_record(operation="bulk", idempotency_key="key1", result={"n": 1})
+    cluster = AsyncMock(spec=RedisCluster)
+    cluster.mget_nonatomic.return_value = [orjson.dumps(record.model_dump(mode="json")), None]
+    repo = RedisAsyncIdempotencyRepository(cluster)
+
+    # Act
+    results = await repo.get_many("bulk", ["key1", "key2"])
+
+    # Assert
+    assert set(results) == {"key1"}
+    assert results["key1"].result == {"n": 1}
+    cluster.mget_nonatomic.assert_awaited_once_with(["idempotency:bulk:key1", "idempotency:bulk:key2"])
+    cluster.mget.assert_not_called()
