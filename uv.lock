@@ -435,6 +435,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "redis" },
+    { name = "redis-client-kit", extra = ["providers", "settings"] },
     { name = "ruff" },
     { name = "testcontainers" },
 ]
@@ -451,6 +452,7 @@ test = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "redis" },
+    { name = "redis-client-kit", extra = ["providers", "settings"] },
     { name = "testcontainers" },
 ]
 
@@ -476,6 +478,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "redis", specifier = ">=5.0.0" },
+    { name = "redis-client-kit", extras = ["providers", "settings"], specifier = ">=0.2.0" },
     { name = "ruff", specifier = ">=0.15.1" },
     { name = "testcontainers", specifier = ">=4.14.1" },
 ]
@@ -492,6 +495,7 @@ test = [
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "redis", specifier = ">=5.0.0" },
+    { name = "redis-client-kit", extras = ["providers", "settings"], specifier = ">=0.2.0" },
     { name = "testcontainers", specifier = ">=4.14.1" },
 ]
 
@@ -1145,6 +1149,20 @@ wheels = [
 ]
 
 [[package]]
+name = "pydantic-settings"
+version = "2.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "typing-inspection" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/68/ca/31c57507b13119d7d3cfa1576dad2911a4861e3be07b579395f4e9d393f9/pydantic_settings-2.15.0.tar.gz", hash = "sha256:694b793e84f766ba76a90ebdefc01d0a9a045dab0382bee70393da93712ad117", size = 261253, upload-time = "2026-08-07T09:24:57.419Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/a4/2bffa9f8e804325a09867f0e9d30795c80ea9f8d62560bd1b6ad6220eb2f/pydantic_settings-2.15.0-py3-none-any.whl", hash = "sha256:0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42", size = 69413, upload-time = "2026-08-07T09:24:55.839Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1339,6 +1357,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a8/99/604f0b666d4c616d891cf77ebb9db6bb21601344c051aebf1b72b9ff915f/redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25", size = 5254356, upload-time = "2026-07-30T08:51:00.269Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/66/9d/c5731f6e3608663d4d3656fd8d3aecee8b509c3082818f5a13eae925baea/redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb", size = 560618, upload-time = "2026-07-30T08:50:58.497Z" },
+]
+
+[[package]]
+name = "redis-client-kit"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "redis" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/1c/4d6b4a063724afe1cfc27dea01342b6ee752242b088275959db954616aaf/redis_client_kit-0.2.0.tar.gz", hash = "sha256:c4eed2444b86952ff34b8b13862e3e3d595d49a1b74b997a98a74aede8b0f5df", size = 24031, upload-time = "2026-09-07T10:53:01.863Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2d/94/286de5e76e2aae1b49d4fa9690ed74cc587f1ae733813bd3df151634fd84/redis_client_kit-0.2.0-py3-none-any.whl", hash = "sha256:b02a3b20025cd748afda54febc27f291ce9090347d1ac24238f8fc0be194f167", size = 33787, upload-time = "2026-09-07T10:53:00.859Z" },
+]
+
+[package.optional-dependencies]
+providers = [
+    { name = "dishka" },
+]
+settings = [
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
 ]
 
 [[package]]

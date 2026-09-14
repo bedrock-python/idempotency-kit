@@ -213,11 +213,13 @@ result = await coordinator.coordinate(
 | `delete_many(operation, idempotency_keys)` | `int` | as `delete` |
 
 `RedisAsyncIdempotencyRepository(redis, *, key_prefix="idempotency:", metrics=None)` is the
-implementation: `SET key value EX ceil(record.ttl_seconds) NX` for `save`, the same without
-`NX` for `replace`, `GET` for `get`, `MGET` for `get_many`, and a non-transactional pipeline
-for `save_many` so it works on Redis Cluster. It deletes any record it reads back expired and
-reports that as a miss. A repository of your own needs `replace` too: the coordinator raises
-`TypeError` at construction without it, unless `in_flight="run"`.
+implementation, and `redis` is a `redis.asyncio.Redis` or a `RedisCluster`: `SET key value EX
+ceil(record.ttl_seconds) NX` for `save`, the same without `NX` for `replace`, `GET` for `get`,
+`MGET` for `get_many` — one per hash slot, via redis-py's `mget_nonatomic`, on a cluster —
+and a non-transactional pipeline for `save_many`, so all of it works on Redis Cluster. It
+deletes any record it reads back expired and reports that as a miss. A repository of your own
+needs `replace` too: the coordinator raises `TypeError` at construction without it, unless
+`in_flight="run"`.
 
 ### Metrics
 
@@ -259,13 +261,18 @@ from idempotency_kit.dishka import (
 )
 
 container = make_async_container(
-    MyRedisProvider(),          # provides redis.asyncio.Redis
+    MyRedisProvider(),          # provides redis.asyncio.Redis | RedisCluster
     MySettingsProvider(),       # provides IdempotencySettingsProtocol
     IdempotencyProvider(),      # IdempotencyDomainService + IdempotencyMetricsProtocol
     AsyncRedisIdempotencyProvider(),
     AsyncIdempotencyCoordinatorProvider(),
 )
 ```
+
+`AsyncRedisIdempotencyProvider` asks for `redis.asyncio.Redis | RedisCluster`, exactly — the
+key `redis_client_kit.AsyncRedisClient` names, so `redis_client_kit.providers.AsyncRedisProvider`
+takes the place of `MyRedisProvider` as is. Dishka matches keys, not subclasses: a provider of
+your own annotated `-> Redis` is a different key, and the container fails to build.
 
 All three are `Scope.APP`. `IdempotencyProvider` gives one metrics collector to the whole
 process — `PrometheusIdempotencyMetrics` when `settings.metrics_enabled`, a no-op otherwise.
@@ -391,6 +398,11 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
     `in_flight="run"` mode the fingerprint is checked on the read before the action; a
     mismatch discovered on the collision after the action is logged and counted as
     `key_reuse`, and the caller keeps its own result, because the side effect has happened.
+25. **The Dishka key for the client is `redis.asyncio.Redis | RedisCluster`, exactly.**
+    `AsyncRedisIdempotencyProvider` requests that union — the key
+    `redis_client_kit.AsyncRedisClient` names — and Dishka matches keys, not subclasses. A
+    provider annotated `-> Redis` fails the container at construction with
+    `GraphMissingFactoryError`; change the annotation, not the client.
 
 ## Common mistakes
 

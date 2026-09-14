@@ -4,7 +4,10 @@ import pytest
 from dishka import Provider, Scope, make_async_container, provide
 from fakeredis.aioredis import FakeRedis
 from prometheus_client import REGISTRY
-from redis.asyncio import Redis as AsyncRedisClient
+from redis.asyncio import Redis, RedisCluster
+from redis_client_kit.config import RedisSettingsProtocol
+from redis_client_kit.providers import AsyncRedisProvider
+from redis_client_kit.settings import BaseRedisSettings
 
 from idempotency_kit import (
     AsyncIdempotencyCoordinator,
@@ -21,6 +24,7 @@ from idempotency_kit.dishka import (
     IdempotencySettingsProtocol,
 )
 from idempotency_kit.infra.metrics.prometheus import PrometheusIdempotencyMetrics
+from idempotency_kit.infra.storage.redis.aio import RedisAsyncIdempotencyRepository
 from idempotency_kit.settings import BaseIdempotencySettings
 
 
@@ -55,9 +59,25 @@ class _AppProvider(Provider):
         )
 
     @provide
-    def redis(self) -> AsyncRedisClient:
-        """Provide a fake Redis client (FakeRedis subclasses redis.asyncio.Redis)."""
+    def redis(self) -> Redis | RedisCluster:
+        """Provide a fake Redis client (FakeRedis subclasses redis.asyncio.Redis) under the shipped provider's key."""
         return FakeRedis()
+
+
+class _RedisClientKitAppProvider(Provider):
+    """Application-side provider for the redis-client-kit wiring: its settings object and ours."""
+
+    scope = Scope.APP
+
+    @provide
+    def redis_settings(self) -> RedisSettingsProtocol:
+        """Provide redis-client-kit settings; nothing connects while the startup health check is off."""
+        return BaseRedisSettings(key_prefix="probe")
+
+    @provide
+    def settings(self) -> IdempotencySettingsProtocol:
+        """Provide idempotency settings."""
+        return BaseIdempotencySettings(key_prefix="probe:", metrics_enabled=False)
 
 
 @pytest.mark.asyncio
@@ -219,5 +239,28 @@ async def test__shipped_providers__in_flight_settings__reach_the_coordinator() -
         # Assert
         assert coordinator._in_flight == "raise"
         assert coordinator._in_flight_lease_seconds == 5
+    finally:
+        await container.close()
+
+
+@pytest.mark.asyncio
+async def test__shipped_providers__redis_client_kit_client__container_builds_and_resolves_repository() -> None:
+    """The client redis-client-kit provides is the one the Redis provider asks for: no adapter in between (#32)."""
+    # Arrange
+    container = make_async_container(
+        AsyncRedisProvider(check_health_on_startup=False),
+        _RedisClientKitAppProvider(),
+        IdempotencyProvider(),
+        AsyncRedisIdempotencyProvider(),
+        AsyncIdempotencyCoordinatorProvider(),
+    )
+
+    # Act
+    try:
+        repository = await container.get(AsyncIdempotencyRepository)
+
+        # Assert
+        assert isinstance(repository, RedisAsyncIdempotencyRepository)
+        assert isinstance(repository._redis, Redis)
     finally:
         await container.close()
