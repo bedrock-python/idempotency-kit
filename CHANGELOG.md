@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.4.0...idempotency-kit-v0.4.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* cache the Prometheus collector per prefix so a rebuilt container does not raise ([0d8cf4e](https://github.com/bedrock-python/idempotency-kit/commit/0d8cf4ef8faa45bd28786da9f1e48477e70c3478)), closes [#36](https://github.com/bedrock-python/idempotency-kit/issues/36)
+
 ## [0.4.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.3.0...idempotency-kit-v0.4.0) (2026-09-14)
 
 
