@@ -1,9 +1,8 @@
 """Unit tests for the shipped Dishka providers."""
 
 import pytest
-from dishka import Provider, Scope, make_async_container, provide
+from dishka import AsyncContainer, Provider, Scope, make_async_container, provide
 from fakeredis.aioredis import FakeRedis
-from prometheus_client import REGISTRY
 from redis.asyncio import Redis, RedisCluster
 from redis_client_kit.config import RedisSettingsProtocol
 from redis_client_kit.providers import AsyncRedisProvider
@@ -23,7 +22,7 @@ from idempotency_kit.dishka import (
     IdempotencyProvider,
     IdempotencySettingsProtocol,
 )
-from idempotency_kit.infra.metrics.prometheus import PrometheusIdempotencyMetrics
+from idempotency_kit.infra.metrics.prometheus import PrometheusIdempotencyMetrics, get_idempotency_metrics
 from idempotency_kit.infra.storage.redis.aio import RedisAsyncIdempotencyRepository
 from idempotency_kit.settings import BaseIdempotencySettings
 
@@ -132,7 +131,6 @@ async def test__idempotency_provider__metrics_enabled__provides_prometheus_metri
         AsyncRedisIdempotencyProvider(),
         AsyncIdempotencyCoordinatorProvider(),
     )
-    metrics: IdempotencyMetricsProtocol | None = None
 
     # Act
     try:
@@ -141,12 +139,55 @@ async def test__idempotency_provider__metrics_enabled__provides_prometheus_metri
         # Assert
         assert isinstance(metrics, PrometheusIdempotencyMetrics)
     finally:
-        # The collectors live in the global prometheus_client REGISTRY, so drop them again —
-        # otherwise a second PrometheusIdempotencyMetrics in this process hits a duplicate-name error.
-        if isinstance(metrics, PrometheusIdempotencyMetrics):
-            REGISTRY.unregister(metrics._operations_total)
-            REGISTRY.unregister(metrics._duration_seconds)
         await container.close()
+
+
+@pytest.mark.asyncio
+async def test__shipped_providers__metrics_enabled__coordinator_receives_prometheus_metrics() -> None:
+    """The collector the coordinator is built with is the Prometheus one, not only the resolvable key."""
+    # Arrange
+    container = make_async_container(
+        _AppProvider(metrics_enabled=True),
+        IdempotencyProvider(),
+        AsyncRedisIdempotencyProvider(),
+        AsyncIdempotencyCoordinatorProvider(),
+    )
+
+    # Act
+    try:
+        coordinator = await container.get(AsyncIdempotencyCoordinator)
+
+        # Assert
+        assert isinstance(coordinator._metrics, PrometheusIdempotencyMetrics)
+        assert coordinator._metrics is get_idempotency_metrics()
+    finally:
+        await container.close()
+
+
+@pytest.mark.asyncio
+async def test__shipped_providers__metrics_enabled__second_container_in_a_process__does_not_raise() -> None:
+    """A container rebuilt per test must not register the Prometheus series a second time."""
+    # Arrange
+    providers = (IdempotencyProvider(), AsyncRedisIdempotencyProvider(), AsyncIdempotencyCoordinatorProvider())
+    first_container = make_async_container(_AppProvider(metrics_enabled=True), *providers)
+    second_container = make_async_container(_AppProvider(metrics_enabled=True), *providers)
+
+    # Act
+    try:
+        first = await container_coordinator(first_container)
+        second = await container_coordinator(second_container)
+
+        # Assert
+        assert isinstance(second._metrics, PrometheusIdempotencyMetrics)
+        assert first._metrics is second._metrics
+    finally:
+        await first_container.close()
+        await second_container.close()
+
+
+async def container_coordinator(container: AsyncContainer) -> AsyncIdempotencyCoordinator:
+    """Resolve the coordinator, which is where the duplicate-series error used to surface."""
+    return await container.get(AsyncIdempotencyCoordinator)
 
 
 @pytest.mark.asyncio

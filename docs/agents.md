@@ -170,7 +170,7 @@ result = await coordinator.coordinate(
 | Name | Import from |
 |---|---|
 | `RedisAsyncIdempotencyRepository` | `idempotency_kit.infra.storage.redis.aio` |
-| `PrometheusIdempotencyMetrics` | `idempotency_kit.infra.metrics.prometheus` |
+| `PrometheusIdempotencyMetrics`, `get_idempotency_metrics` | `idempotency_kit.infra.metrics.prometheus` |
 | `BaseIdempotencySettings` | `idempotency_kit.settings` |
 | `IdempotencyProvider`, `AsyncIdempotencyCoordinatorProvider`, `AsyncRedisIdempotencyProvider`, `IdempotencySettingsProtocol` | `idempotency_kit.dishka` |
 | `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH`, `DEFAULT_TTL_MINUTES`, `MIN_TTL_SECONDS`, `MAX_TTL_SECONDS`, `InFlightMode`, `DEFAULT_IN_FLIGHT_MODE`, `DEFAULT_IN_FLIGHT_LEASE_SECONDS`, `IN_FLIGHT_POLL_INTERVAL_SECONDS` | `idempotency_kit.core.constants` |
@@ -226,7 +226,7 @@ needs `replace` too: the coordinator raises `TypeError` at construction without 
 `IdempotencyMetricsProtocol` is `record_hit(operation)`, `record_miss(operation)`,
 `record_collision(operation)`, `record_error(operation, error_type)`,
 `record_latency(operation, method, duration_seconds)`, `record_bulk_hit(operation, count)`
-and `record_bulk_miss(operation, count)`. `PrometheusIdempotencyMetrics(prefix=None)` emits
+and `record_bulk_miss(operation, count)`. `PrometheusIdempotencyMetrics(prefix=None, registry=None)` emits
 `idempotency_operations_total{operation,status}` and
 `idempotency_operation_duration_seconds{operation,method}`.
 
@@ -275,8 +275,10 @@ takes the place of `MyRedisProvider` as is. Dishka matches keys, not subclasses:
 your own annotated `-> Redis` is a different key, and the container fails to build.
 
 All three are `Scope.APP`. `IdempotencyProvider` gives one metrics collector to the whole
-process — `PrometheusIdempotencyMetrics` when `settings.metrics_enabled`, a no-op otherwise.
-Another backend goes in with `@provide(override=True)` in a provider listed after it.
+process, under the key `IdempotencyMetricsProtocol` the other two ask for —
+`get_idempotency_metrics()` when `settings.metrics_enabled`, a no-op otherwise — so a
+container rebuilt per test gets the instance the first one registered. Another backend, or a
+metric prefix, goes in with `@provide(override=True)` in a provider listed after it.
 `settings.enabled`, `settings.in_flight` and `settings.in_flight_lease_seconds` reach the
 coordinator: `enabled=False` makes it a pass-through. A settings object written before those
 fields existed is read as enabled, `"wait"` and 30 seconds.
@@ -363,9 +365,11 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
     same `operation` as `records[0]`, the pipeline is non-transactional for cluster
     compatibility, and partial writes stay unless `rollback_on_error=True`. A collision
     anywhere raises `IdempotencyKeyCollisionError` whose `key` is a `list[str]`.
-17. **`PrometheusIdempotencyMetrics` is one instance per process.** It registers its
-    collectors in the constructor; a second instance with the same prefix raises from
-    `prometheus_client`.
+17. **`PrometheusIdempotencyMetrics` is one instance per prefix per registry.** It registers
+    its collectors in the constructor; a second instance with the same prefix on the same
+    registry raises from `prometheus_client`. Take it from `get_idempotency_metrics(prefix)`,
+    which caches one per prefix on the default registry and is what `IdempotencyProvider`
+    calls, or give a test its own `registry=`.
 18. **Each metric has one owner.** The coordinator records hit, miss, collision and the
     latency of `get`, `reserve` and `save`; the repository records errors, the bulk hit and
     miss counts of `get_many`, and the latency of `delete` and `get_many`. One collector

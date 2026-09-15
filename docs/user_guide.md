@@ -372,6 +372,14 @@ repo = RedisAsyncIdempotencyRepository(redis, metrics=metrics)
 coordinator = AsyncIdempotencyCoordinator(repo, IdempotencyDomainService(), metrics=metrics)
 ```
 
+A Prometheus collector ships as `PrometheusIdempotencyMetrics` in `idempotency_kit.infra.metrics.prometheus` (install the `prometheus` extra). Prometheus registers a metric name once per registry, so a second `PrometheusIdempotencyMetrics()` in a process raises; take it from `get_idempotency_metrics(prefix=None)` instead, which keeps one instance per prefix on the default registry, or give a test its own `PrometheusIdempotencyMetrics(registry=CollectorRegistry())`.
+
+```python
+from idempotency_kit.infra.metrics.prometheus import get_idempotency_metrics
+
+metrics = get_idempotency_metrics()  # the same instance on every call
+```
+
 ## Configuration Reference
 
 ### IdempotencyDomainService
@@ -742,7 +750,7 @@ def create_api_container(settings: Settings) -> AsyncContainer:
     )
 ```
 
-Your own providers supply the Redis client and the settings object. The client is requested as `redis.asyncio.Redis | RedisCluster` — the key `redis_client_kit.AsyncRedisClient` names, so `redis_client_kit.providers.AsyncRedisProvider` stands in for `RedisProvider()` above with no adapter in between. A provider of your own must use that exact annotation: Dishka matches keys exactly, and `Redis` alone is a different one. The settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. To use another metrics backend, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
+Your own providers supply the Redis client and the settings object. The client is requested as `redis.asyncio.Redis | RedisCluster` — the key `redis_client_kit.AsyncRedisClient` names, so `redis_client_kit.providers.AsyncRedisProvider` stands in for `RedisProvider()` above with no adapter in between. A provider of your own must use that exact annotation: Dishka matches keys exactly, and `Redis` alone is a different one. The settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector, under the key `IdempotencyMetricsProtocol` that the repository and the coordinator ask for: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. The Prometheus one comes from `get_idempotency_metrics()` — one instance per prefix on the default registry — so a container rebuilt per test, as a test suite does, gets the instance the first one registered instead of a `DuplicateTimeseries` from `prometheus_client`. To use another metrics backend, or a metric name prefix, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
 
 `enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. `in_flight` and `in_flight_lease_seconds` reach the coordinator the same way. A settings object that predates these fields is read as enabled, `"wait"` and 30 seconds.
 
