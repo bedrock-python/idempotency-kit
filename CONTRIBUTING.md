@@ -8,7 +8,7 @@ Thank you for your interest in contributing! This document covers everything you
 git clone https://github.com/bedrock-python/idempotency-kit.git
 cd idempotency-kit
 uv sync --group dev
-uv run pre-commit install --hook-type commit-msg
+uv run pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
 ## Running checks
