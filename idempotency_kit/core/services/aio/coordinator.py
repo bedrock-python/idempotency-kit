@@ -13,15 +13,19 @@ from pydantic import ValidationError
 from idempotency_kit.core.constants import (
     DEFAULT_IN_FLIGHT_LEASE_SECONDS,
     DEFAULT_IN_FLIGHT_MODE,
+    DEFAULT_ON_STORAGE_ERROR,
     IN_FLIGHT_POLL_INTERVAL_SECONDS,
     InFlightMode,
+    StorageErrorMode,
 )
 from idempotency_kit.core.exceptions import (
+    IdempotencyError,
     IdempotencyInProgressError,
     IdempotencyInvalidTTLError,
     IdempotencyKeyCollisionError,
     IdempotencyKeyReuseError,
     IdempotencyRecordExpiredError,
+    IdempotencyStorageError,
     IdempotencyValidationError,
 )
 from idempotency_kit.core.models.entities import IdempotencyIdentifiers, IdempotencyRecord
@@ -35,6 +39,7 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 _IN_FLIGHT_MODES: tuple[InFlightMode, ...] = ("wait", "raise", "run")
+_STORAGE_ERROR_MODES: tuple[StorageErrorMode, ...] = ("run", "raise")
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,10 @@ class AsyncIdempotencyCoordinator:
         in_flight_lease_seconds: How long a reservation outlives its owner before it counts
             as abandoned, and the longest a waiting caller waits. The owner renews it every
             third of a lease while the action runs, so it does not have to outlive the action.
+        on_storage_error: What a call gets when the store fails before the action runs, on
+            the reservation or the read. ``"run"`` (the default) runs the action unprotected,
+            ``"raise"`` raises ``IdempotencyStorageError`` and does not run it. A failure once
+            the action has started, renewing, saving or releasing, is logged either way.
     """
 
     def __init__(
@@ -87,11 +96,16 @@ class AsyncIdempotencyCoordinator:
         enabled: bool = True,
         in_flight: InFlightMode = DEFAULT_IN_FLIGHT_MODE,
         in_flight_lease_seconds: int = DEFAULT_IN_FLIGHT_LEASE_SECONDS,
+        on_storage_error: StorageErrorMode = DEFAULT_ON_STORAGE_ERROR,
     ) -> None:
         if in_flight not in _IN_FLIGHT_MODES:
             raise IdempotencyValidationError(f"in_flight must be one of {_IN_FLIGHT_MODES}, got {in_flight!r}")
         if in_flight_lease_seconds < 1:
             raise IdempotencyValidationError(f"in_flight_lease_seconds must be >= 1, got {in_flight_lease_seconds}")
+        if on_storage_error not in _STORAGE_ERROR_MODES:
+            raise IdempotencyValidationError(
+                f"on_storage_error must be one of {_STORAGE_ERROR_MODES}, got {on_storage_error!r}"
+            )
         if in_flight != "run" and not callable(getattr(repository, "replace", None)):
             # A repository written before reservations existed would take the pending
             # record through save() and never get it replaced, so every retry within the
@@ -107,6 +121,7 @@ class AsyncIdempotencyCoordinator:
         self._enabled = enabled
         self._in_flight = in_flight
         self._in_flight_lease_seconds = in_flight_lease_seconds
+        self._on_storage_error = on_storage_error
 
     async def coordinate(
         self,
@@ -135,8 +150,10 @@ class AsyncIdempotencyCoordinator:
         With ``enabled=False`` the action is simply run: nothing is validated, read or
         written, and no metric is recorded.
 
-        Storage and decode trouble never raise: the coordinator degrades to running the
-        action. What does raise is ``IdempotencyInProgressError``, when another call with
+        Storage and decode trouble do not raise by default: the coordinator degrades to
+        running the action. With ``on_storage_error="raise"`` a store that fails before the
+        action runs raises ``IdempotencyStorageError`` instead, and the action does not run.
+        What also raises is ``IdempotencyInProgressError``, when another call with
         the same key is still running its action and ``in_flight`` is ``"raise"``, or
         ``"wait"`` and a whole lease has passed; and ``IdempotencyKeyReuseError``, when the
         record under the key was made for a different request.
@@ -296,12 +313,13 @@ class AsyncIdempotencyCoordinator:
                 extra={"operation": operation, "idempotency_key": idempotency_key},
             )
             return None
-        except Exception:
+        except Exception as e:
             self._metrics.record_error(operation, "storage_reserve_error")
             logger.exception(
                 "Idempotency coordinator error while reserving",
                 extra={"operation": operation, "idempotency_key": idempotency_key},
             )
+            self._raise_if_failing_closed(operation, e)
             return None
         else:
             return pending
@@ -356,6 +374,23 @@ class AsyncIdempotencyCoordinator:
                 extra={"operation": reservation.operation, "idempotency_key": reservation.idempotency_key},
             )
 
+    def _raise_if_failing_closed(self, operation: str, error: Exception) -> None:
+        """Raise ``IdempotencyStorageError`` for a failed store when ``on_storage_error`` is ``"raise"``.
+
+        A store that answered with a record nobody can read (an ``IdempotencyError`` other
+        than a storage one) is not an outage: the action runs and its result replaces the
+        record. Anything outside the library's hierarchy is a driver error a custom
+        repository let through, and counts as the store failing.
+        """
+        if self._on_storage_error != "raise":
+            return
+        if isinstance(error, IdempotencyStorageError):
+            raise error
+        if not isinstance(error, IdempotencyError):
+            raise IdempotencyStorageError(
+                f"Idempotency storage failure for {operation}", operation=operation, original_error=error
+            ) from error
+
     async def _try_release(self, operation: str, idempotency_key: str) -> None:
         """Delete our pending record so the retry runs the action again; storage trouble is logged, not raised."""
         try:
@@ -389,12 +424,13 @@ class AsyncIdempotencyCoordinator:
                 extra={"operation": operation, "idempotency_key": idempotency_key},
             )
             raise
-        except Exception:
+        except Exception as e:
             self._metrics.record_error(operation, "storage_get_error")
             logger.exception(
                 "Idempotency coordinator error while fetching",
                 extra={"operation": operation, "idempotency_key": idempotency_key},
             )
+            self._raise_if_failing_closed(operation, e)
             return _Lookup.UNUSABLE
         finally:
             self._metrics.record_latency(operation, "get", time.perf_counter() - start_time)

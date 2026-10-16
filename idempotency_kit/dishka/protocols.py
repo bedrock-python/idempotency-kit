@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from idempotency_kit.core.constants import InFlightMode
+from idempotency_kit.core.constants import InFlightMode, StorageErrorMode
 
 
 @runtime_checkable
@@ -62,5 +62,13 @@ class IdempotencySettingsProtocol(Protocol):
         """How long an in-flight reservation is held before it counts as abandoned.
 
         A settings object without the attribute is read as the default lease.
+        """
+        ...
+
+    @property
+    def on_storage_error(self) -> StorageErrorMode:
+        """What a call gets when the store fails before the action runs.
+
+        A settings object without the attribute is read as ``"run"``.
         """
         ...

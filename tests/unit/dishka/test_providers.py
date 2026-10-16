@@ -15,7 +15,7 @@ from idempotency_kit import (
     JsonResultAdapter,
     NoOpIdempotencyMetrics,
 )
-from idempotency_kit.core.constants import InFlightMode
+from idempotency_kit.core.constants import InFlightMode, StorageErrorMode
 from idempotency_kit.dishka import (
     AsyncIdempotencyCoordinatorProvider,
     AsyncRedisIdempotencyProvider,
@@ -39,12 +39,14 @@ class _AppProvider(Provider):
         enabled: bool = True,
         in_flight: InFlightMode = "wait",
         in_flight_lease_seconds: int = 30,
+        on_storage_error: StorageErrorMode = "run",
     ) -> None:
         super().__init__()
         self._metrics_enabled = metrics_enabled
         self._enabled = enabled
         self._in_flight = in_flight
         self._in_flight_lease_seconds = in_flight_lease_seconds
+        self._on_storage_error = on_storage_error
 
     @provide
     def settings(self) -> IdempotencySettingsProtocol:
@@ -55,6 +57,7 @@ class _AppProvider(Provider):
             enabled=self._enabled,
             in_flight=self._in_flight,
             in_flight_lease_seconds=self._in_flight_lease_seconds,
+            on_storage_error=self._on_storage_error,
         )
 
     @provide
@@ -280,6 +283,27 @@ async def test__shipped_providers__in_flight_settings__reach_the_coordinator() -
         # Assert
         assert coordinator._in_flight == "raise"
         assert coordinator._in_flight_lease_seconds == 5
+    finally:
+        await container.close()
+
+
+@pytest.mark.asyncio
+async def test__shipped_providers__on_storage_error_setting__reaches_the_coordinator() -> None:
+    """A service that wants to fail closed says so on the settings object."""
+    # Arrange
+    container = make_async_container(
+        _AppProvider(metrics_enabled=False, on_storage_error="raise"),
+        IdempotencyProvider(),
+        AsyncRedisIdempotencyProvider(),
+        AsyncIdempotencyCoordinatorProvider(),
+    )
+
+    # Act
+    try:
+        coordinator = await container.get(AsyncIdempotencyCoordinator)
+
+        # Assert
+        assert coordinator._on_storage_error == "raise"
     finally:
         await container.close()
 

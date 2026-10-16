@@ -184,8 +184,9 @@ The library follows the **Idempotency Key Pattern**:
 
 What this gives is one execution per key while storage is up and the owner keeps renewing
 its reservation, and at-least-once when storage is down, because the coordinator then runs the
-action unreserved rather than failing the request (see Graceful Degradation in the User
-Guide). It is not exactly-once: the reservation is a lease, not a lock.
+action unreserved rather than failing the request — or, with `on_storage_error="raise"`,
+no execution and an `IdempotencyStorageError` the caller turns into a 503 (see Failing
+closed in the User Guide). It is not exactly-once: the reservation is a lease, not a lock.
 
 ## Redis Key Format
 
