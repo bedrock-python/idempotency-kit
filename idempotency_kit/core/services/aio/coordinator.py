@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import Enum, auto
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from idempotency_kit.core.constants import (
     DEFAULT_IN_FLIGHT_LEASE_SECONDS,
@@ -69,8 +71,9 @@ class AsyncIdempotencyCoordinator:
             under the same key. ``"wait"`` (the default) waits for the first caller's result,
             ``"raise"`` raises ``IdempotencyInProgressError`` at once, and ``"run"`` runs the
             action too, as the coordinator did before reservations existed.
-        in_flight_lease_seconds: How long a reservation is held before it counts as
-            abandoned, and the longest a waiting caller waits. It has to outlive the action.
+        in_flight_lease_seconds: How long a reservation outlives its owner before it counts
+            as abandoned, and the longest a waiting caller waits. The owner renews it every
+            third of a lease while the action runs, so it does not have to outlive the action.
     """
 
     def __init__(
@@ -144,11 +147,12 @@ class AsyncIdempotencyCoordinator:
             return claim.value
 
         try:
-            result = await action(*args, **kwargs)
+            async with self._renewing(claim):
+                result = await action(*args, **kwargs)
         except BaseException:
             # Failures are not cached, so the reservation goes too and the retry runs
             # again. Cancellation counts: nothing says the action completed.
-            if claim:
+            if claim is not None:
                 await self._try_release(operation, idempotency_key)
             raise
 
@@ -156,7 +160,7 @@ class AsyncIdempotencyCoordinator:
         completed = await self._try_complete(
             operation, idempotency_key, result, adapter, ttl_minutes, idempotency_fingerprint
         )
-        if claim and not completed:
+        if claim is not None and not completed:
             # Our reservation with no result behind it would make every retry within the
             # lease wait for, or be refused over, a record that is never coming.
             await self._try_release(operation, idempotency_key)
@@ -192,14 +196,15 @@ class AsyncIdempotencyCoordinator:
         idempotency_key: str,
         adapter: ResultAdapter[T],
         fingerprint: str | None,
-    ) -> _Hit[T] | bool:
+    ) -> _Hit[T] | IdempotencyRecord | None:
         """Reserve the key, or replay the record that holds it.
 
-        Returns the hit when a completed record is there, ``True`` when the reservation is
-        ours, and ``False`` when the key holds nothing usable and the action has to run
-        unreserved. Raises ``IdempotencyInProgressError`` for a key another caller holds,
-        at once in ``"raise"`` mode and after a whole lease of waiting in ``"wait"`` mode,
-        and ``IdempotencyKeyReuseError`` for a key that holds a different request.
+        Returns the hit when a completed record is there, our pending record when the
+        reservation is ours, and ``None`` when the key holds nothing usable and the action
+        has to run unreserved. Raises ``IdempotencyInProgressError`` for a key another
+        caller holds, at once in ``"raise"`` mode and after a whole lease of waiting in
+        ``"wait"`` mode, and ``IdempotencyKeyReuseError`` for a key that holds a different
+        request.
         """
         deadline = time.monotonic() + self._in_flight_lease_seconds
         read = False
@@ -207,19 +212,19 @@ class AsyncIdempotencyCoordinator:
         while True:
             reserved = await self._try_reserve(operation, idempotency_key, fingerprint)
             if reserved is None:
-                return False
-            if reserved:
+                return None
+            if reserved is not False:
                 # A read that came before us has counted the miss already.
                 if not read:
                     self._metrics.record_miss(operation)
-                return True
+                return reserved
 
             found = await self._try_get_cached(operation, idempotency_key, adapter, fingerprint)
             read = True
             if isinstance(found, _Hit):
                 return found
             if found is _Lookup.UNUSABLE:
-                return False
+                return None
             if found is _Lookup.IN_FLIGHT:
                 if not waiting:
                     waiting = True
@@ -253,11 +258,13 @@ class AsyncIdempotencyCoordinator:
             return None
         return max(1, effective_ttl_seconds // 60)
 
-    async def _try_reserve(self, operation: str, idempotency_key: str, fingerprint: str | None) -> bool | None:
+    async def _try_reserve(
+        self, operation: str, idempotency_key: str, fingerprint: str | None
+    ) -> IdempotencyRecord | Literal[False] | None:
         """Write the pending record under ``SET NX``.
 
-        ``True`` when the reservation is ours, ``False`` when the key is already taken,
-        ``None`` when the write could not be made at all.
+        The pending record when the reservation is ours, ``False`` when the key is already
+        taken, ``None`` when the write could not be made at all.
         """
         start_time = time.perf_counter()
         try:
@@ -285,9 +292,57 @@ class AsyncIdempotencyCoordinator:
             )
             return None
         else:
-            return True
+            return pending
         finally:
             self._metrics.record_latency(operation, "reserve", time.perf_counter() - start_time)
+
+    @asynccontextmanager
+    async def _renewing(self, reservation: IdempotencyRecord | None) -> AsyncIterator[None]:
+        """Keep our reservation from expiring while the body runs; nothing to do without one.
+
+        On the way out, by any exit, the renewal is told to stop and waited for, not
+        cancelled: a renewal write cancelled in flight could still land after the result or
+        the release that follows, and put a pending record back over it.
+        """
+        if reservation is None:
+            yield
+            return
+        stop = asyncio.Event()
+        renewal = asyncio.create_task(self._renew(reservation, stop))
+        try:
+            yield
+        finally:
+            stop.set()
+            await asyncio.wait({renewal})
+
+    async def _renew(self, reservation: IdempotencyRecord, stop: asyncio.Event) -> None:
+        """Push the reservation's expiry a lease ahead every third of a lease, until told to stop."""
+        interval = self._in_flight_lease_seconds / 3
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), interval)
+            except TimeoutError:
+                await self._try_renew(reservation)
+            else:
+                return
+
+    async def _try_renew(self, reservation: IdempotencyRecord) -> None:
+        """Rewrite our pending record with its expiry a lease from now; storage trouble is logged, not raised.
+
+        One failure is absorbed by the next attempt, two by the rest of the lease; a store
+        down for longer loses the reservation, and the action runs on regardless.
+        """
+        renewed = reservation.model_copy(
+            update={"expires_at": datetime.now(UTC) + timedelta(seconds=self._in_flight_lease_seconds)}
+        )
+        try:
+            await self._repo.replace(renewed)
+        except Exception:
+            self._metrics.record_error(reservation.operation, "storage_renew_error")
+            logger.exception(
+                "Idempotency coordinator error while renewing a reservation",
+                extra={"operation": reservation.operation, "idempotency_key": reservation.idempotency_key},
+            )
 
     async def _try_release(self, operation: str, idempotency_key: str) -> None:
         """Delete our pending record so the retry runs the action again; storage trouble is logged, not raised."""

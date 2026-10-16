@@ -33,8 +33,8 @@ InFlightMode = Literal["wait", "raise", "run"]
 # instead of producing a second one.
 DEFAULT_IN_FLIGHT_MODE: InFlightMode = "wait"
 
-# How long a reservation is held before it counts as abandoned (30 seconds). It has to
-# outlive the action; a waiting caller gives up after the same span.
+# How long a reservation outlives its owner before it counts as abandoned (30 seconds).
+# The owner renews it while the action runs; a waiting caller gives up after the same span.
 DEFAULT_IN_FLIGHT_LEASE_SECONDS: int = 30
 
 # How often a waiting caller re-reads the key.

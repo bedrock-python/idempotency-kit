@@ -53,7 +53,7 @@ The flow: reserve the key, run the action, store the result; replay a stored res
   - `metrics` (IdempotencyMetricsProtocol, optional): Metrics collector.
   - `enabled` (bool, default: True): `False` runs the action and nothing else.
   - `in_flight` (`"wait" | "raise" | "run"`, default: `"wait"`): What a second caller gets while the first one's action is still running under the same key — the first caller's result once it lands, `IdempotencyInProgressError` at once, or a run of its own with the winner's result adopted on collision.
-  - `in_flight_lease_seconds` (int, default: 30): How long a reservation is held before it counts as abandoned, and the longest a waiting caller waits. Must be at least 1 and longer than the action can take.
+  - `in_flight_lease_seconds` (int, default: 30): How long a reservation outlives its owner before it counts as abandoned, and the longest a waiting caller waits. Must be at least 1. The owner renews the reservation every third of a lease while the action runs, so the action may take longer.
   - *Note*: The constructor raises `TypeError` when the repository has no `replace` and `in_flight` is not `"run"`.
 - **Methods**:
   - `coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)`: Runs the flow and returns the action's result type. Everything after the five positional-only arguments goes to the action except `idempotency_fingerprint`, the fingerprint of the request, which is stored with the record and compared on a hit. Never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, and `IdempotencyKeyReuseError` when the record's fingerprint differs from the caller's.
