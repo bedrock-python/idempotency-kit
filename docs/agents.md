@@ -42,8 +42,10 @@ that hides the whole flow, and Dishka providers that wire the pieces together.
 **It does not** derive the key — the caller supplies it, and the request body is not part of
 it unless you name the parameters that fingerprint the request; it does not roll anything
 back; it does not cache failures; it does not retry; it has no sync API; and it stores
-nothing but JSON. The reservation is a lease, not a lock: an action
-that outlives its lease can run twice, and when storage is down the action runs unreserved.
+nothing but JSON. The reservation is a lease, not a lock: the owner renews it while the
+action runs, but an owner that cannot renew it for a whole lease (a blocked event loop, a
+store that is down) loses it and the action can run twice, and when storage is down the
+action runs unreserved.
 It is a result cache with an in-flight reservation, not a distributed transaction.
 
 ## Mental model
@@ -64,8 +66,9 @@ Four nouns and one flow.
 * **`ResultAdapter`** — `encode` a return value into JSON, `decode` it back. Three ship:
   `PydanticResultAdapter(model_class)`, `JsonResultAdapter()`, `VoidResultAdapter()`.
 * **`AsyncIdempotencyCoordinator`** — the flow: reserve the key by writing a pending
-  record under `SET NX` with the lease as its TTL. If that succeeds, run the action, encode
-  the result and `replace` the reservation with the completed record. If it fails, read
+  record under `SET NX` with the lease as its TTL. If that succeeds, run the action while
+  renewing the reservation every third of a lease, encode the result and `replace` the
+  reservation with the completed record. If it fails, read
   what holds the key: a record whose `fingerprint` differs from the caller's raises
   `IdempotencyKeyReuseError`, pending or not; a completed record is decoded and returned; a
   pending one means another caller is in flight, and `in_flight` decides — `"wait"` polls
@@ -240,7 +243,7 @@ second caller records on finding the pending record: a waiter then records a hit
 result arrives, a refused caller records nothing more and raises. In `"run"` mode it is the
 loser's `SET NX` failing after both ran, as before. The error types the coordinator reports
 are `storage_get_error`, `storage_reserve_error`, `storage_save_error`,
-`storage_release_error`, `record_validation_error` and `key_reuse`.
+`storage_release_error`, `storage_renew_error`, `record_validation_error` and `key_reuse`.
 
 ### Settings and Dishka
 
@@ -306,8 +309,13 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
    before reservations existed: both run, the loser's `SET NX` collides and it adopts the
    winner's result; the callers see one result and the side effect happened twice, so keep
    it for actions that are genuinely safe to repeat. The reservation is a lease, not a lock:
-   a pending record past its lease counts as absent and the next caller runs the action, so
-   `in_flight_lease_seconds` has to be longer than the action can ever take.
+   while the action runs, the owner rewrites the pending record every third of a lease with
+   its expiry a lease ahead, and a pending record past its lease counts as absent and the
+   next caller runs the action. So the lease does not have to outlive the action; it is how
+   long a dead owner holds the key, and how long a waiter waits. Renewal runs on the event
+   loop: an action that blocks the loop for a whole lease loses the key. A failed renewal is
+   counted as `storage_renew_error` and the next one tries again; a store down for a whole
+   lease loses the reservation, and the action carries on.
 3. **Declare the key keyword-only anyway.** The decorator reads `key_param` from the
    keyword arguments, and from the positional arguments when the parameter can be passed
    that way. Keyword-only is still the shape to write: nothing can land in it by position,
@@ -465,15 +473,16 @@ except IdempotencyInProgressError:
 ```
 
 ```python
-# WRONG — a lease the action can outlive: the reservation expires mid-run, a retry at
-# second six finds the key free, and the provider is charged twice after all
-coordinator = AsyncIdempotencyCoordinator(repository, service, in_flight_lease_seconds=5)
-
+# WRONG — a blocking call inside the action: the event loop cannot renew the reservation,
+# it expires after a lease, a retry finds the key free, and the provider is charged twice
+@async_idempotent(operation="payment.charge", adapter=PydanticResultAdapter(ChargeDTO))
 async def charge(self, dto, *, idempotency_key: str | None = None) -> ChargeDTO:
-    return await self._psp.charge(dto, timeout=20)
+    return self._psp_sync_client.charge(dto, timeout=60)
 
-# RIGHT — the lease outlives the action's worst case, timeouts and retries included
-coordinator = AsyncIdempotencyCoordinator(repository, service, in_flight_lease_seconds=60)
+# RIGHT — keep the loop free while the action waits
+@async_idempotent(operation="payment.charge", adapter=PydanticResultAdapter(ChargeDTO))
+async def charge(self, dto, *, idempotency_key: str | None = None) -> ChargeDTO:
+    return await asyncio.to_thread(self._psp_sync_client.charge, dto, timeout=60)
 ```
 
 ```python

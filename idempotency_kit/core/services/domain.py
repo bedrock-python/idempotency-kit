@@ -102,8 +102,8 @@ class IdempotencyDomainService:
     ) -> IdempotencyRecord:
         """Create the in-flight reservation for an operation whose action is about to run.
 
-        The lease is not a record TTL and is not held to the TTL bounds: it only has to
-        outlive the action, and the coordinator decides it.
+        The lease is not a record TTL and is not held to the TTL bounds: the coordinator
+        decides it, and renews the reservation while the action runs.
 
         Args:
             operation: Operation name (e.g., 'user.create')

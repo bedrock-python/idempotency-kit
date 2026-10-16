@@ -106,9 +106,12 @@ sequenceDiagram
 
 The wait is bounded by the lease: a pending record past its lease counts as absent, so a
 worker that crashed mid-action cannot hold the key for longer, and a waiter that has spent a
-whole lease raises `IdempotencyInProgressError` rather than waiting forever. The other side of
-that bound is that the lease has to outlive the action; a reservation that expires mid-run
-lets the next caller run the action again.
+whole lease raises `IdempotencyInProgressError` rather than waiting forever. A live owner
+does not lose the key that way: while its action runs, a task beside it rewrites the pending
+record every third of a lease with its expiry a lease ahead. The task is stopped and waited
+for, not cancelled, before the result is written or the reservation deleted, so a renewal
+still on its way to the store cannot land after either. Expiry therefore means the owner is
+gone, or could not reach the store or run its event loop for a whole lease.
 
 ### Concurrent Callers with `in_flight="run"`
 
@@ -179,8 +182,8 @@ The library follows the **Idempotency Key Pattern**:
 2. Server reserves the key; if the key is already taken, it returns the stored result, or waits for the caller that holds it.
 3. If the reservation succeeds, it executes the operation, writes the result over the reservation, and returns it.
 
-What this gives is one execution per key while storage is up and the action finishes within
-its lease, and at-least-once when storage is down, because the coordinator then runs the
+What this gives is one execution per key while storage is up and the owner keeps renewing
+its reservation, and at-least-once when storage is down, because the coordinator then runs the
 action unreserved rather than failing the request (see Graceful Degradation in the User
 Guide). It is not exactly-once: the reservation is a lease, not a lock.
 

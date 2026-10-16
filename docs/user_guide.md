@@ -122,12 +122,20 @@ async def charge(dto: ChargeDTO, idempotency_key: str | None = Header(None, alia
         raise HTTPException(409, detail="a request with this Idempotency-Key is still being processed")
 ```
 
-**The lease.** `in_flight_lease_seconds` (default 30) is how long the reservation is held.
-A pending record past its lease counts as absent, so a worker that crashed mid-action cannot
-wedge the key; it is also how long a waiting caller waits before it gives up with
-`IdempotencyInProgressError`. The flip side is that the lease has to be longer than the action
-can ever take, timeouts and internal retries included: a reservation that expires while the
-action is still running lets the next caller run it again.
+**The lease.** `in_flight_lease_seconds` (default 30) is how long the reservation outlives
+its owner. While the action runs, the owner renews it every third of a lease, pushing its
+expiry a lease ahead, so an action may take longer than the lease. A pending record past its
+lease counts as absent, so a worker that crashed mid-action holds the key for at most one
+lease; it is also how long a waiting caller waits before it gives up with
+`IdempotencyInProgressError`. Pick it for those two: how long a retry should be blocked by a
+dead worker, and how long a duplicate should wait for the original's result.
+
+Renewal is a task on the event loop. An action that blocks the loop (a synchronous client, a
+CPU-bound step) for a whole lease stops it, the reservation expires, and the next caller runs
+the action again; run such work with `asyncio.to_thread`. A renewal the store rejects is
+logged and counted as `storage_renew_error`, and the next one, a third of a lease later,
+tries again; a store down for a whole lease loses the reservation, and the action carries on
+regardless.
 
 **Failures.** An action that raises, or is cancelled, deletes its reservation before the
 exception propagates, so the retry runs the action again — failures are not cached, and
@@ -412,7 +420,7 @@ coordinator = AsyncIdempotencyCoordinator(
     metrics=custom_metrics,                 # Optional metrics collector
     enabled=True,                           # False runs the action and nothing else
     in_flight="wait",                       # "wait" | "raise" | "run", see In-flight requests
-    in_flight_lease_seconds=30,             # How long a reservation is held; must outlive the action
+    in_flight_lease_seconds=30,             # How long a reservation outlives a dead owner; renewed while the action runs
 )
 ```
 
@@ -428,7 +436,7 @@ from settings and you get the same numbers.
 | `MIN_TTL_SECONDS` | 60 | the floor every TTL is raised to |
 | `MAX_TTL_SECONDS` | 2592000 | the ceiling, thirty days |
 | `DEFAULT_IN_FLIGHT_MODE` | `"wait"` | what a second caller gets while the first is in flight |
-| `DEFAULT_IN_FLIGHT_LEASE_SECONDS` | 30 | how long a reservation is held, and the longest a caller waits |
+| `DEFAULT_IN_FLIGHT_LEASE_SECONDS` | 30 | how long a reservation outlives its owner, and the longest a caller waits |
 | `IN_FLIGHT_POLL_INTERVAL_SECONDS` | 0.05 | how often a waiting caller re-reads the key |
 
 `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH` and the `InFlightMode` type live beside them.
@@ -479,7 +487,7 @@ The library defines several exceptions to handle various idempotency scenarios:
 
 1. **Natural Keys**: Use natural unique identifiers as idempotency keys if possible (e.g., `order_id`, `message_id`).
 2. **Atomic Operations**: Always save the result to the cache *after* the business logic has successfully completed.
-3. **Lease Longer Than the Action**: Set `in_flight_lease_seconds` above the longest the action can take, timeouts and retries included; a reservation that expires mid-run lets the next caller run the action again.
+3. **Keep the Event Loop Free**: The reservation is renewed on the event loop while the action runs; an action that blocks the loop for a whole lease loses it and lets the next caller run the action again. Push blocking work to `asyncio.to_thread`.
 4. **Fingerprint the Request**: Name the parameters that identify the request in `fingerprint_params`, so a key reused by mistake for a different request is refused with `IdempotencyKeyReuseError` rather than answered with the first result.
 5. **Pydantic Support**: The library works best with Pydantic models. Use `model_dump(mode="json")` when saving and `**cached.result` when restoring.
 6. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery) than to crash (exactly-once requirement).

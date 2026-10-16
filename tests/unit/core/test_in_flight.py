@@ -21,6 +21,7 @@ from idempotency_kit import (
     IdempotencyKeyCollisionError,
     IdempotencyMetricsProtocol,
     IdempotencyRecord,
+    IdempotencyStorageError,
     IdempotencyValidationError,
     JsonResultAdapter,
 )
@@ -394,3 +395,133 @@ def test__coordinator__repository_without_replace__raises_type_error_unless_in_f
     AsyncIdempotencyCoordinator(
         repository=legacy_repository, domain_service=IdempotencyDomainService(), in_flight="run"
     )
+
+
+class _RenewalFailingRepository(RedisAsyncIdempotencyRepository):
+    """Fails the first ``fail`` renewals -- a ``replace`` of a pending record; completions go through."""
+
+    def __init__(self, redis: AsyncRedisClient, *, fail: int) -> None:
+        super().__init__(redis, key_prefix="probe:")
+        self.renewals = 0
+        self._fail = fail
+
+    async def replace(self, record: IdempotencyRecord) -> None:
+        if record.is_pending:
+            self.renewals += 1
+            if self.renewals <= self._fail:
+                raise IdempotencyStorageError("redis down", operation=record.operation)
+        await super().replace(record)
+
+
+async def _owner_and_a_latecomer(
+    repository: RedisAsyncIdempotencyRepository, *, hold: float, late_by: float, metrics: Any = None
+) -> tuple[list[str], list[str | BaseException]]:
+    """An owner with a one-second lease holding the key for ``hold`` seconds, and a caller arriving ``late_by`` in."""
+    owner = AsyncIdempotencyCoordinator(
+        repository=repository, domain_service=IdempotencyDomainService(), in_flight_lease_seconds=1, metrics=metrics
+    )
+    latecomer = AsyncIdempotencyCoordinator(
+        repository=repository, domain_service=IdempotencyDomainService(), in_flight="raise", in_flight_lease_seconds=1
+    )
+    runs: list[str] = []
+
+    async def action(tag: str, seconds: float) -> str:
+        runs.append(tag)
+        await asyncio.sleep(seconds)
+        return tag
+
+    first = asyncio.create_task(owner.coordinate("op", "key", 600, JsonResultAdapter(), action, "owner", hold))
+    await asyncio.sleep(late_by)
+    second = asyncio.create_task(latecomer.coordinate("op", "key", 600, JsonResultAdapter(), action, "latecomer", 0))
+    results: list[str | BaseException] = await asyncio.gather(first, second, return_exceptions=True)
+    return runs, results
+
+
+@pytest.mark.asyncio
+async def test__coordinator__action_outlives_its_lease__the_reservation_is_renewed_and_a_latecomer_is_refused(
+    redis_repository: RedisAsyncIdempotencyRepository,
+) -> None:
+    """Issue #52: a live owner's reservation no longer expires a lease after it started."""
+    # Act
+    runs, results = await _owner_and_a_latecomer(redis_repository, hold=1.6, late_by=1.3)
+
+    # Assert
+    assert runs == ["owner"]
+    assert results[0] == "owner"
+    assert isinstance(results[1], IdempotencyInProgressError)
+
+
+@pytest.mark.asyncio
+async def test__coordinator__a_renewal_fails__it_is_counted_and_the_next_one_keeps_the_reservation(
+    fake_redis: AsyncRedisClient,
+) -> None:
+    """One lost renewal is absorbed: the next comes a third of a lease later, well before the expiry."""
+    # Arrange
+    repository = _RenewalFailingRepository(fake_redis, fail=1)
+    metrics = MagicMock(spec=IdempotencyMetricsProtocol)
+
+    # Act
+    runs, results = await _owner_and_a_latecomer(repository, hold=1.6, late_by=1.3, metrics=metrics)
+
+    # Assert
+    assert runs == ["owner"]
+    assert results[0] == "owner"
+    assert isinstance(results[1], IdempotencyInProgressError)
+    metrics.record_error.assert_called_once_with("op", "storage_renew_error")
+
+
+@pytest.mark.asyncio
+async def test__coordinator__every_renewal_fails__the_reservation_lapses_and_the_owner_still_completes(
+    fake_redis: AsyncRedisClient,
+) -> None:
+    """A store down for a whole lease loses the reservation, as before renewal; the owner's action is not cut short."""
+    # Arrange
+    repository = _RenewalFailingRepository(fake_redis, fail=100)
+
+    # Act
+    runs, results = await _owner_and_a_latecomer(repository, hold=1.6, late_by=1.3)
+
+    # Assert
+    assert runs == ["owner", "latecomer"]
+    assert results == ["owner", "latecomer"]
+    assert repository.renewals >= 3
+
+
+class _SlowRenewalRepository(RedisAsyncIdempotencyRepository):
+    """A renewal that is already on the wire: it lands 0.3 s later even if the caller stops waiting for it."""
+
+    async def replace(self, record: IdempotencyRecord) -> None:
+        if record.is_pending:
+            await asyncio.shield(self._land_later(record))
+            return
+        await super().replace(record)
+
+    async def _land_later(self, record: IdempotencyRecord) -> None:
+        await asyncio.sleep(0.3)
+        await super().replace(record)
+
+
+@pytest.mark.asyncio
+async def test__coordinator__renewal_in_flight_when_the_action_ends__lands_before_the_result_not_over_it(
+    fake_redis: AsyncRedisClient,
+) -> None:
+    """Cancelling the renewal would let its write land after the completed record and put the key back in flight."""
+    # Arrange
+    repository = _SlowRenewalRepository(fake_redis, key_prefix="probe:")
+    coordinator = AsyncIdempotencyCoordinator(
+        repository=repository, domain_service=IdempotencyDomainService(), in_flight_lease_seconds=1
+    )
+
+    async def action() -> str:
+        await asyncio.sleep(0.5)  # ends while the renewal sent at 1/3 s is still on its way
+        return "done"
+
+    # Act
+    result = await coordinator.coordinate("op", "key", 600, JsonResultAdapter(), action)
+    await asyncio.sleep(0.4)
+
+    # Assert
+    assert result == "done"
+    stored = await repository.get("op", "key")
+    assert stored is not None
+    assert (stored.status, stored.result) == ("completed", "done")
