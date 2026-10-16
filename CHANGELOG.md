@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.4.1...idempotency-kit-v0.5.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* coordinate() and @async_idempotent raise IdempotencyValidationError for an empty key, which used to mean "no idempotency", and for a key or operation that is whitespace-only, contains ":" or is too long, which used to run the action unprotected. Pass None, not "", when a request carries no key, and map IdempotencyValidationError to HTTP 400.
+
+### Features
+
+* let the coordinator fail closed when the idempotency store is unavailable ([#55](https://github.com/bedrock-python/idempotency-kit/issues/55)) ([c23aad6](https://github.com/bedrock-python/idempotency-kit/commit/c23aad645c5981768cafb71e127758188e9e1771)), closes [#53](https://github.com/bedrock-python/idempotency-kit/issues/53)
+
+
+### Bug Fixes
+
+* raise on an invalid idempotency key instead of running the action unprotected ([#54](https://github.com/bedrock-python/idempotency-kit/issues/54)) ([50c2fd3](https://github.com/bedrock-python/idempotency-kit/commit/50c2fd36d17a363affb1a85c435eec99afd94d71)), closes [#51](https://github.com/bedrock-python/idempotency-kit/issues/51)
+* renew the reservation while the action runs ([#56](https://github.com/bedrock-python/idempotency-kit/issues/56)) ([e86c51f](https://github.com/bedrock-python/idempotency-kit/commit/e86c51f065ca512f3a0198a27b8b526f52c50a21)), closes [#52](https://github.com/bedrock-python/idempotency-kit/issues/52)
+
 ## [0.4.1](https://github.com/bedrock-python/idempotency-kit/compare/idempotency-kit-v0.4.0...idempotency-kit-v0.4.1) (2026-09-15)
 
 
