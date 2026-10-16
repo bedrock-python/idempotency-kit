@@ -113,6 +113,27 @@ async def test__decorator__no_key__executes_directly(mock_coordinator: MagicMock
 
 
 @pytest.mark.asyncio
+async def test__decorator__empty_key__goes_to_the_coordinator(
+    mock_coordinator: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """Only ``None`` means no key; an empty one is the coordinator's to refuse."""
+    # Arrange
+    mock_coordinator.coordinate.return_value = "coordinated"
+
+    @async_idempotent(operation="test.op", adapter=mock_adapter)
+    async def my_func(idempotency_key: str | None, coord: AsyncIdempotencyCoordinator) -> str:
+        return "direct"
+
+    # Act
+    result = await my_func(idempotency_key="", coord=mock_coordinator)
+
+    # Assert
+    assert result == "coordinated"
+    mock_coordinator.coordinate.assert_awaited_once()
+    assert mock_coordinator.coordinate.call_args.args[1] == ""
+
+
+@pytest.mark.asyncio
 async def test__decorator__no_coordinator__executes_directly(mock_adapter: MagicMock) -> None:
     """Test that missing coordinator causes direct function execution."""
     # Arrange

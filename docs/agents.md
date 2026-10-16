@@ -179,7 +179,7 @@ result = await coordinator.coordinate(
 
 | Method | Returns | Notes |
 |---|---|---|
-| `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)` | `T` | never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, `IdempotencyKeyReuseError` when the record's fingerprint differs from `idempotency_fingerprint` |
+| `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)` | `T` | never raises for storage or decode trouble; raises `IdempotencyValidationError` when the operation or a non-`None` key is invalid, `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, `IdempotencyKeyReuseError` when the record's fingerprint differs from `idempotency_fingerprint` |
 | `IdempotencyDomainService.create_record(operation, idempotency_key, result, *, ttl_minutes=None, fingerprint=None)` | `IdempotencyRecord` | raises `IdempotencyInvalidTTLError`, `IdempotencyValidationError` |
 | `IdempotencyDomainService.create_pending_record(operation, idempotency_key, *, lease_seconds, fingerprint=None)` | `IdempotencyRecord` | the reservation; not held to the TTL bounds; raises `IdempotencyValidationError` |
 | `IdempotencyDomainService.validate_record(record)` | `None` | raises `IdempotencyRecordExpiredError`; the coordinator calls it on every record it reads |
@@ -312,8 +312,12 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
    keyword arguments, and from the positional arguments when the parameter can be passed
    that way. Keyword-only is still the shape to write: nothing can land in it by position,
    and the call site has to name it.
-4. **A falsy key means no idempotency.** `None` and `""` both short-circuit straight to the
-   action, in the decorator and in `coordinate()`.
+4. **Only `None` means no idempotency.** `None` short-circuits straight to the action, in
+   the decorator and in `coordinate()`. Any other key, `""` included, is checked together
+   with the operation before anything is read or run (rule 12); an invalid one raises
+   `IdempotencyValidationError`, 400 in HTTP terms, and the action does not run. Pass `None`,
+   not `""`, when a request carries no key. `enabled=False` skips the check along with
+   everything else.
 5. **A coordinator the decorator cannot find means no idempotency.** It looks for
    `infra_param` by name in `kwargs` then as an attribute of the first positional argument,
    then for an `AsyncIdempotencyCoordinator` by type in `kwargs`, in `args`, and in the
@@ -348,8 +352,10 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
     `IdempotencyInvalidTTLError`, which the coordinator catches: the operation is simply not
     cached, and the caller gets its result anyway.
 12. **Neither identifier may contain a colon**, both are stripped of surrounding whitespace,
-    and the lengths are 100 for `operation` and 255 for `idempotency_key`. The Redis
-    repository re-validates on every call, so an over-long key raises there too.
+    and the lengths are 100 for `operation` and 255 for `idempotency_key`; an empty or
+    whitespace-only one is invalid. `coordinate()` and the decorator raise
+    `IdempotencyValidationError` for either before the action runs, and the Redis repository
+    re-validates on every call.
 13. **`PydanticResultAdapter` cannot represent an absent result.** `encode` raises
     `IdempotencyValidationError` when handed `None` rather than storing a `null` it could
     never decode again; the coordinator counts that as `record_validation_error`, logs it,
@@ -532,11 +538,12 @@ All derive from `IdempotencyError`, which is exported alongside them.
 | `IdempotencyInProgressError` | `(operation, key)` | another call with the same key is still running its action. `coordinate()` and the decorator raise it at once with `in_flight="raise"`, and after a whole lease of waiting with `"wait"`. Carries `.operation` and `.key` |
 | `IdempotencyKeyReuseError` | `(operation, key, stored_fingerprint, fingerprint)` | the record under the key was made for a different request. `coordinate()` and the decorator raise it before the action runs, from a completed record and from a pending one. Carries all four |
 | `IdempotencyStorageError` | `(message, operation=None, original_error=None)` | the backend failed. Carries `.operation` and `.original_error` |
-| `IdempotencyValidationError` | `(message, errors=None)` | an identifier or a result failed validation. `.errors` holds the Pydantic error list when there is one |
+| `IdempotencyValidationError` | `(message, errors=None)` | an identifier or a result failed validation. `coordinate()` and the decorator raise it for an invalid operation or key before the action runs. `.errors` holds the Pydantic error list when there is one |
 | `IdempotencyInvalidTTLError` | `(ttl_seconds, min_ttl, max_ttl)` | the TTL is outside the domain service's range. Carries all three |
 
-Through `coordinate()` and the decorator only `IdempotencyInProgressError` and
-`IdempotencyKeyReuseError` reach the caller — both are about the request, not about storage:
+Through `coordinate()` and the decorator only `IdempotencyValidationError` for the
+identifiers, `IdempotencyInProgressError` and `IdempotencyKeyReuseError` reach the caller —
+all three are about the request, not about storage:
 the collision is resolved into a wait or the winner's result, and every other one is logged,
 counted and swallowed. The rest are the contract of the repository and the domain
 service, which is where you meet them if you drive those directly.
