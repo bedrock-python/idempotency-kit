@@ -456,6 +456,12 @@ The same `idempotency_key` can be used for different operations (e.g., `user.cre
 - Both are stripped of leading/trailing whitespace.
 - Max lengths: operation (100), key (255).
 
+`coordinate()` and the decorator check both before the action runs. An invalid key — empty,
+whitespace-only, with a colon or too long — raises `IdempotencyValidationError` instead of
+running the action unprotected, so a malformed `Idempotency-Key` header becomes a 400 rather
+than a request whose retries are silently not deduplicated. Only `None` means "no key":
+pass `None`, not `""`, when the request carries none.
+
 ### Error Handling
 
 The library defines several exceptions to handle various idempotency scenarios:
@@ -465,7 +471,7 @@ The library defines several exceptions to handle various idempotency scenarios:
 - **`IdempotencyKeyReuseError`**: Raised by `coordinator.coordinate()` and the decorator when the record under the key was made for a request with a different fingerprint. Carries both fingerprints. Map it to HTTP 422.
 - **`IdempotencyRecordExpiredError`**: Raised by `service.validate_record()` if the record exists but its TTL has passed.
 - **`IdempotencyInvalidTTLError`**: Raised by `service.create_record()` if the requested TTL is outside the allowed range (configured in `IdempotencyDomainService`).
-- **`IdempotencyValidationError`**: Raised by `service.create_record()` if validation of `operation` or `idempotency_key` fails (e.g., empty string or too long).
+- **`IdempotencyValidationError`**: Raised by `coordinator.coordinate()` and the decorator before the action runs, and by `service.create_record()`, if validation of `operation` or `idempotency_key` fails (e.g., empty string or too long). Map it to HTTP 400.
 - **`IdempotencyStorageError`**: Raised for critical infrastructure failures like Redis connection errors. This allows you to distinguish between a cache miss and a storage backend failure.
 - **`IdempotencyError`**: Base exception for all library errors. Also raised for data corruption during deserialization.
 

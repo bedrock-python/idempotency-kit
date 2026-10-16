@@ -4,11 +4,15 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fakeredis import FakeAsyncRedis as AsyncRedisClient
 
+from idempotency_kit.core.adapters import JsonResultAdapter
+from idempotency_kit.core.constants import InFlightMode
 from idempotency_kit.core.exceptions import IdempotencyKeyCollisionError, IdempotencyValidationError
 from idempotency_kit.core.models.entities import IdempotencyRecord
 from idempotency_kit.core.services.aio.coordinator import AsyncIdempotencyCoordinator
 from idempotency_kit.core.services.domain import IdempotencyDomainService
+from idempotency_kit.infra.storage.redis.aio import RedisAsyncIdempotencyRepository
 
 
 @pytest.mark.asyncio
@@ -358,3 +362,61 @@ async def test__coordinator__disabled__runs_the_action_without_touching_storage(
     mock_repo.get.assert_not_called()
     mock_repo.save.assert_not_called()
     metrics.record_miss.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_flight", ["wait", "raise", "run"])
+@pytest.mark.parametrize(
+    "idempotency_key", ["", "order:42", "x" * 256, "   "], ids=["empty", "colon", "too_long", "whitespace"]
+)
+async def test__coordinator__invalid_key__raises_validation_error_on_every_retry_and_never_runs_the_action(
+    redis_repository: RedisAsyncIdempotencyRepository,
+    fake_redis: AsyncRedisClient,
+    idempotency_key: str,
+    in_flight: InFlightMode,
+) -> None:
+    """Issue #51: a key the store cannot hold used to run the action unprotected, so every retry repeated it."""
+    # Arrange
+    coordinator = AsyncIdempotencyCoordinator(
+        repository=redis_repository, domain_service=IdempotencyDomainService(), in_flight=in_flight
+    )
+    action = AsyncMock(return_value={"charge_id": "ch_1"})
+
+    # Act & Assert
+    for _ in range(2):
+        with pytest.raises(IdempotencyValidationError, match="idempotency_key"):
+            await coordinator.coordinate("payment.charge", idempotency_key, 3600, JsonResultAdapter(), action)
+    action.assert_not_called()
+    assert await fake_redis.keys("*") == []
+
+
+@pytest.mark.asyncio
+async def test__coordinator__invalid_operation__raises_validation_error_before_the_action(
+    redis_repository: RedisAsyncIdempotencyRepository,
+) -> None:
+    """The operation is half of the storage key and is held to the same rules."""
+    # Arrange
+    coordinator = AsyncIdempotencyCoordinator(repository=redis_repository, domain_service=IdempotencyDomainService())
+    action = AsyncMock()
+
+    # Act & Assert
+    with pytest.raises(IdempotencyValidationError, match="operation"):
+        await coordinator.coordinate("payment:charge", "order-42", 3600, JsonResultAdapter(), action)
+    action.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test__coordinator__disabled_with_an_invalid_key__runs_the_action_without_validating(
+    mock_repo: AsyncMock, mock_domain_service: MagicMock, mock_adapter: MagicMock
+) -> None:
+    """enabled=False stays a pass-through: the switch does not start refusing requests."""
+    # Arrange
+    coordinator = AsyncIdempotencyCoordinator(repository=mock_repo, domain_service=mock_domain_service, enabled=False)
+    action = AsyncMock(return_value="ran")
+
+    # Act
+    result = await coordinator.coordinate("op", "", 60, mock_adapter, action)
+
+    # Assert
+    assert result == "ran"
+    action.assert_awaited_once()

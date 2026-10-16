@@ -56,7 +56,7 @@ The flow: reserve the key, run the action, store the result; replay a stored res
   - `in_flight_lease_seconds` (int, default: 30): How long a reservation is held before it counts as abandoned, and the longest a waiting caller waits. Must be at least 1 and longer than the action can take.
   - *Note*: The constructor raises `TypeError` when the repository has no `replace` and `in_flight` is not `"run"`.
 - **Methods**:
-  - `coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)`: Runs the flow and returns the action's result type. Everything after the five positional-only arguments goes to the action except `idempotency_fingerprint`, the fingerprint of the request, which is stored with the record and compared on a hit. Never raises for storage or decode trouble; raises `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, and `IdempotencyKeyReuseError` when the record's fingerprint differs from the caller's.
+  - `coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)`: Runs the flow and returns the action's result type. Everything after the five positional-only arguments goes to the action except `idempotency_fingerprint`, the fingerprint of the request, which is stored with the record and compared on a hit. A `None` key runs the action and nothing else. Never raises for storage or decode trouble; raises `IdempotencyValidationError` when the operation or a non-`None` key (the empty string included) is invalid, before the action runs, `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, and `IdempotencyKeyReuseError` when the record's fingerprint differs from the caller's.
 
 ### async_idempotent
 The same flow as a decorator: it finds the key in the call's arguments and the coordinator in the call's arguments or on `self`, then delegates to `coordinate()`.
@@ -119,6 +119,6 @@ Redis implementation of the repository protocol.
 - **`IdempotencyInProgressError(operation, key)`**: Raised by `coordinate()` and the decorator when another call with the same key is still running its action.
 - **`IdempotencyKeyReuseError(operation, key, stored_fingerprint, fingerprint)`**: Raised by `coordinate()` and the decorator when the record under the key was made for a request with a different fingerprint.
 - **`IdempotencyStorageError(message, operation, original_error)`**: Raised on storage failure.
-- **`IdempotencyValidationError(message, errors=None)`**: Raised for invalid input (e.g. empty key, too long string).
+- **`IdempotencyValidationError(message, errors=None)`**: Raised for invalid input (e.g. empty key, too long string), by `coordinate()` and the decorator before the action runs as well.
   - `errors` (list, optional): Detailed Pydantic validation errors.
 - **`IdempotencyInvalidTTLError(ttl_seconds, min_ttl, max_ttl)`**: Raised for invalid TTL.

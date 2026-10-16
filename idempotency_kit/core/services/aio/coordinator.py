@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Generic, TypeVar
 
+from pydantic import ValidationError
+
 from idempotency_kit.core.constants import (
     DEFAULT_IN_FLIGHT_LEASE_SECONDS,
     DEFAULT_IN_FLIGHT_MODE,
@@ -20,7 +22,7 @@ from idempotency_kit.core.exceptions import (
     IdempotencyRecordExpiredError,
     IdempotencyValidationError,
 )
-from idempotency_kit.core.models.entities import IdempotencyRecord
+from idempotency_kit.core.models.entities import IdempotencyIdentifiers, IdempotencyRecord
 from idempotency_kit.core.protocols.adapter import ResultAdapter
 from idempotency_kit.core.protocols.aio.repository import AsyncIdempotencyRepository
 from idempotency_kit.core.protocols.metrics import IdempotencyMetricsProtocol, NoOpIdempotencyMetrics
@@ -122,7 +124,12 @@ class AsyncIdempotencyCoordinator:
         the record, and a record under the same key with a different fingerprint is a key
         reuse. ``None`` on either side means no comparison, which is the key-only behaviour.
 
-        With ``enabled=False`` the action is simply run: nothing is read, nothing is
+        A ``None`` key means no idempotency: the action is simply run. Any other key,
+        the empty string included, has to be a valid identifier, and so does the operation;
+        an invalid one raises ``IdempotencyValidationError`` before the action runs, since
+        running it unprotected would leave the client believing its retries are safe.
+
+        With ``enabled=False`` the action is simply run: nothing is validated, read or
         written, and no metric is recorded.
 
         Storage and decode trouble never raise: the coordinator degrades to running the
@@ -131,8 +138,13 @@ class AsyncIdempotencyCoordinator:
         ``"wait"`` and a whole lease has passed; and ``IdempotencyKeyReuseError``, when the
         record under the key was made for a different request.
         """
-        if not self._enabled or not idempotency_key:
+        if not self._enabled or idempotency_key is None:
             return await action(*args, **kwargs)
+
+        try:
+            IdempotencyIdentifiers(operation=operation, idempotency_key=idempotency_key)
+        except ValidationError as e:
+            raise IdempotencyValidationError(str(e), errors=e.errors()) from e
 
         if self._in_flight == "run":
             return await self._coordinate_unreserved(

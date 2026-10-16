@@ -91,7 +91,7 @@ def async_idempotent(
         async def wrapper(*args: Any, **kwargs: Any) -> T:
             # 1. Resolve idempotency key
             idempotency_key = _resolve_key(args, kwargs)
-            if not idempotency_key:
+            if idempotency_key is None:
                 return await func(*args, **kwargs)
 
             # 2. Resolve coordinator
