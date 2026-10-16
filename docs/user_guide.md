@@ -145,9 +145,8 @@ result, and the key is freed rather than holding retries for a record that never
 
 **Storage trouble.** A reservation that cannot be written is logged and counted as
 `storage_reserve_error`, and the action runs unreserved — the same trade of exactly-once for
-availability the coordinator makes everywhere else. `IdempotencyInProgressError` is the one
-exception `coordinate()` and the decorator do raise: it is about the caller's request, not
-about storage.
+availability the coordinator makes everywhere else, unless `on_storage_error="raise"` says
+otherwise (see [Failing closed](#failing-closed-when-the-store-is-down)).
 
 **Metrics.** The first caller is a miss; the second caller records a collision when it finds
 the reservation, then a hit when it gets the record (`"wait"`) or nothing more (`"raise"`,
@@ -305,6 +304,38 @@ deleted_count = await idempotency_repo.delete_many("user.create", [key1, key2, k
 
 Distinguishing between different error types allows for robust integration.
 
+### Failing closed when the store is down
+
+By default the coordinator runs the action when it cannot reach the store, so a Redis
+outage costs exactly-once, not availability. That is the wrong trade for an effect that is
+expensive or impossible to repeat when nothing downstream deduplicates it: a charge at a
+provider without its own idempotency keys, an email, a ledger write in another system. For
+those, build the coordinator with `on_storage_error="raise"`:
+
+```python
+coordinator = AsyncIdempotencyCoordinator(repo, service, on_storage_error="raise")
+
+@app.post("/charges")
+async def charge(dto: ChargeRequest, idempotency_key: str | None = Header(None, alias="Idempotency-Key")):
+    try:
+        return await use_case.execute(dto, idempotency_key=idempotency_key)
+    except IdempotencyStorageError:
+        raise HTTPException(503, detail="try again later")
+```
+
+| Where the store fails | `on_storage_error="run"` (default) | `on_storage_error="raise"` |
+|---|---|---|
+| reserving the key, or reading it | logged, counted, the action runs unprotected | logged, counted, `IdempotencyStorageError`; the action does not run |
+| renewing the reservation, saving the result, or releasing the reservation | logged, counted; the action carries on and its result is returned | the same: the action has started, and raising would make the client retry it |
+
+What is raised is the repository's own `IdempotencyStorageError`, with `operation` and
+`original_error`; a custom repository that lets a driver exception through gets it wrapped
+in one. Out of `coordinate()` it always means the action did not run. A record the store
+returned but cannot be read (corrupted, or an adapter that no longer decodes it) is not an
+outage: in both modes the action runs and its result replaces the record. The option is
+per coordinator, so a service with both kinds of operation builds two. Settings and the
+Dishka provider carry it as `on_storage_error`.
+
 ### Graceful Degradation (IdempotencyStorageError)
 
 If Redis is down, you might want to proceed with the operation anyway.
@@ -421,6 +452,7 @@ coordinator = AsyncIdempotencyCoordinator(
     enabled=True,                           # False runs the action and nothing else
     in_flight="wait",                       # "wait" | "raise" | "run", see In-flight requests
     in_flight_lease_seconds=30,             # How long a reservation outlives a dead owner; renewed while the action runs
+    on_storage_error="run",                 # "run" | "raise", see Failing closed when the store is down
 )
 ```
 
@@ -438,6 +470,7 @@ from settings and you get the same numbers.
 | `DEFAULT_IN_FLIGHT_MODE` | `"wait"` | what a second caller gets while the first is in flight |
 | `DEFAULT_IN_FLIGHT_LEASE_SECONDS` | 30 | how long a reservation outlives its owner, and the longest a caller waits |
 | `IN_FLIGHT_POLL_INTERVAL_SECONDS` | 0.05 | how often a waiting caller re-reads the key |
+| `DEFAULT_ON_STORAGE_ERROR` | `"run"` | what a call gets when the store fails before the action |
 
 `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH` and the `InFlightMode` type live beside them.
 
@@ -480,7 +513,7 @@ The library defines several exceptions to handle various idempotency scenarios:
 - **`IdempotencyRecordExpiredError`**: Raised by `service.validate_record()` if the record exists but its TTL has passed.
 - **`IdempotencyInvalidTTLError`**: Raised by `service.create_record()` if the requested TTL is outside the allowed range (configured in `IdempotencyDomainService`).
 - **`IdempotencyValidationError`**: Raised by `coordinator.coordinate()` and the decorator before the action runs, and by `service.create_record()`, if validation of `operation` or `idempotency_key` fails (e.g., empty string or too long). Map it to HTTP 400.
-- **`IdempotencyStorageError`**: Raised for critical infrastructure failures like Redis connection errors. This allows you to distinguish between a cache miss and a storage backend failure.
+- **`IdempotencyStorageError`**: Raised by the repository for critical infrastructure failures like Redis connection errors. This allows you to distinguish between a cache miss and a storage backend failure. `coordinator.coordinate()` and the decorator raise it only with `on_storage_error="raise"`, before the action runs. Map it to HTTP 503.
 - **`IdempotencyError`**: Base exception for all library errors. Also raised for data corruption during deserialization.
 
 ## Best Practices
@@ -490,7 +523,7 @@ The library defines several exceptions to handle various idempotency scenarios:
 3. **Keep the Event Loop Free**: The reservation is renewed on the event loop while the action runs; an action that blocks the loop for a whole lease loses it and lets the next caller run the action again. Push blocking work to `asyncio.to_thread`.
 4. **Fingerprint the Request**: Name the parameters that identify the request in `fingerprint_params`, so a key reused by mistake for a different request is refused with `IdempotencyKeyReuseError` rather than answered with the first result.
 5. **Pydantic Support**: The library works best with Pydantic models. Use `model_dump(mode="json")` when saving and `**cached.result` when restoring.
-6. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery) than to crash (exactly-once requirement).
+6. **Graceful Degradation**: Decide whether your service should fail if idempotency storage is down. For most high-availability services, it's better to log an error and proceed (at-least-once delivery), which is the default; for an effect that must not repeat, pass `on_storage_error="raise"` and answer 503.
 
 ## Production Examples
 
@@ -766,7 +799,7 @@ def create_api_container(settings: Settings) -> AsyncContainer:
 
 Your own providers supply the Redis client and the settings object. The client is requested as `redis.asyncio.Redis | RedisCluster` — the key `redis_client_kit.AsyncRedisClient` names, so `redis_client_kit.providers.AsyncRedisProvider` stands in for `RedisProvider()` above with no adapter in between. A provider of your own must use that exact annotation: Dishka matches keys exactly, and `Redis` alone is a different one. The settings object must satisfy `IdempotencySettingsProtocol`, which `BaseIdempotencySettings` does. `IdempotencyProvider` also provides the metrics collector, under the key `IdempotencyMetricsProtocol` that the repository and the coordinator ask for: `PrometheusIdempotencyMetrics` when `metrics_enabled` is true (install the `prometheus` extra), a no-op collector otherwise. The Prometheus one comes from `get_idempotency_metrics()` — one instance per prefix on the default registry — so a container rebuilt per test, as a test suite does, gets the instance the first one registered instead of a `DuplicateTimeseries` from `prometheus_client`. To use another metrics backend, or a metric name prefix, provide `IdempotencyMetricsProtocol` yourself with `@provide(override=True)` in a provider listed after `IdempotencyProvider()`.
 
-`enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. `in_flight` and `in_flight_lease_seconds` reach the coordinator the same way. A settings object that predates these fields is read as enabled, `"wait"` and 30 seconds.
+`enabled` on the settings object is the kill switch: with `enabled=False` the coordinator these providers build runs the action and nothing else — no read, no write, no metric. `in_flight`, `in_flight_lease_seconds` and `on_storage_error` reach the coordinator the same way. A settings object that predates these fields is read as enabled, `"wait"`, 30 seconds and `"run"`.
 
 ## Migration Guide
 

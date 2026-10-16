@@ -39,3 +39,11 @@ DEFAULT_IN_FLIGHT_LEASE_SECONDS: int = 30
 
 # How often a waiting caller re-reads the key.
 IN_FLIGHT_POLL_INTERVAL_SECONDS: float = 0.05
+
+# Storage failures
+# What the coordinator does when the store fails before the action runs, on the
+# reservation or the read: run the action unprotected, or raise IdempotencyStorageError.
+StorageErrorMode = Literal["run", "raise"]
+
+# Run by default: availability over exactly-once.
+DEFAULT_ON_STORAGE_ERROR: StorageErrorMode = "run"

@@ -77,7 +77,8 @@ Four nouns and one flow.
   has passed is a miss even if the repository handed it back; an expired lease is an
   abandoned reservation. An action that raises deletes its reservation. Storage and decode
   failures are swallowed and the action runs, which is the deliberate trade of exactly-once
-  for availability.
+  for availability; `on_storage_error="raise"` turns a storage failure before the action
+  into `IdempotencyStorageError` instead.
 
 `IdempotencyDomainService` sits between the coordinator and the record: it applies the TTL
 bounds, builds the pending record for a reservation, and turns Pydantic validation errors
@@ -155,7 +156,7 @@ result = await coordinator.coordinate(
 |---|---|---|
 | `async_idempotent` | `(operation, adapter, ttl_seconds=None, key_param="idempotency_key", infra_param=None, fingerprint_params=None)` | decorator for an async function or method; `fingerprint_params` names the parameters whose values identify the request |
 | `fingerprint_of` | `(**values)` | SHA-256 hex of the JSON form of the named values, keys sorted; what the decorator computes from `fingerprint_params`, for a caller of `coordinate()` |
-| `AsyncIdempotencyCoordinator` | `(repository, domain_service, operation_ttls=None, metrics=None, enabled=True, in_flight="wait", in_flight_lease_seconds=30)` | the flow; `operation_ttls` is `dict[str, int]` in seconds; `enabled=False` runs the action and nothing else; `in_flight` is `"wait"`, `"raise"` or `"run"` |
+| `AsyncIdempotencyCoordinator` | `(repository, domain_service, operation_ttls=None, metrics=None, enabled=True, in_flight="wait", in_flight_lease_seconds=30, on_storage_error="run")` | the flow; `operation_ttls` is `dict[str, int]` in seconds; `enabled=False` runs the action and nothing else; `in_flight` is `"wait"`, `"raise"` or `"run"`; `on_storage_error` is `"run"` or `"raise"` |
 | `IdempotencyDomainService` | `(*, default_ttl_minutes=60, min_ttl_seconds=60, max_ttl_seconds=2592000)` | record factory and TTL bounds; keyword-only, defaults from `core.constants` |
 | `IdempotencyRecord` | frozen Pydantic model | the cached result |
 | `IdempotencyIdentifiers` | Pydantic model | `operation` + `idempotency_key`, and the rules they obey |
@@ -176,13 +177,13 @@ result = await coordinator.coordinate(
 | `PrometheusIdempotencyMetrics`, `get_idempotency_metrics` | `idempotency_kit.infra.metrics.prometheus` |
 | `BaseIdempotencySettings` | `idempotency_kit.settings` |
 | `IdempotencyProvider`, `AsyncIdempotencyCoordinatorProvider`, `AsyncRedisIdempotencyProvider`, `IdempotencySettingsProtocol` | `idempotency_kit.dishka` |
-| `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH`, `DEFAULT_TTL_MINUTES`, `MIN_TTL_SECONDS`, `MAX_TTL_SECONDS`, `InFlightMode`, `DEFAULT_IN_FLIGHT_MODE`, `DEFAULT_IN_FLIGHT_LEASE_SECONDS`, `IN_FLIGHT_POLL_INTERVAL_SECONDS` | `idempotency_kit.core.constants` |
+| `MAX_KEY_LENGTH`, `MAX_OPERATION_LENGTH`, `DEFAULT_TTL_MINUTES`, `MIN_TTL_SECONDS`, `MAX_TTL_SECONDS`, `InFlightMode`, `DEFAULT_IN_FLIGHT_MODE`, `DEFAULT_IN_FLIGHT_LEASE_SECONDS`, `IN_FLIGHT_POLL_INTERVAL_SECONDS`, `StorageErrorMode`, `DEFAULT_ON_STORAGE_ERROR` | `idempotency_kit.core.constants` |
 
 ### Coordinator and domain service
 
 | Method | Returns | Notes |
 |---|---|---|
-| `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)` | `T` | never raises for storage or decode trouble; raises `IdempotencyValidationError` when the operation or a non-`None` key is invalid, `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, `IdempotencyKeyReuseError` when the record's fingerprint differs from `idempotency_fingerprint` |
+| `AsyncIdempotencyCoordinator.coordinate(operation, idempotency_key, ttl_seconds, adapter, action, /, *args, idempotency_fingerprint=None, **kwargs)` | `T` | never raises for decode trouble, nor for storage trouble unless `on_storage_error="raise"` (then `IdempotencyStorageError`, before the action runs); raises `IdempotencyValidationError` when the operation or a non-`None` key is invalid, `IdempotencyInProgressError` when the key is in flight and `in_flight` says so, `IdempotencyKeyReuseError` when the record's fingerprint differs from `idempotency_fingerprint` |
 | `IdempotencyDomainService.create_record(operation, idempotency_key, result, *, ttl_minutes=None, fingerprint=None)` | `IdempotencyRecord` | raises `IdempotencyInvalidTTLError`, `IdempotencyValidationError` |
 | `IdempotencyDomainService.create_pending_record(operation, idempotency_key, *, lease_seconds, fingerprint=None)` | `IdempotencyRecord` | the reservation; not held to the TTL bounds; raises `IdempotencyValidationError` |
 | `IdempotencyDomainService.validate_record(record)` | `None` | raises `IdempotencyRecordExpiredError`; the coordinator calls it on every record it reads |
@@ -249,8 +250,9 @@ are `storage_get_error`, `storage_reserve_error`, `storage_save_error`,
 
 `BaseIdempotencySettings` is a plain Pydantic model with `enabled=True`, `key_prefix`
 (required, no default), `metrics_enabled=False`, `default_ttl_minutes=60`,
-`min_ttl_seconds=60`, `max_ttl_seconds=2592000`, `operation_ttls={}`, `in_flight="wait"`
-and `in_flight_lease_seconds=30` — the TTL and in-flight fields default to the
+`min_ttl_seconds=60`, `max_ttl_seconds=2592000`, `operation_ttls={}`, `in_flight="wait"`,
+`in_flight_lease_seconds=30` and `on_storage_error="run"` — the TTL, in-flight and
+storage-error fields default to the
 `core.constants` values, which is also what `IdempotencyDomainService` and the coordinator
 use. It satisfies `IdempotencySettingsProtocol`, which is what the providers ask for.
 
@@ -282,9 +284,10 @@ process, under the key `IdempotencyMetricsProtocol` the other two ask for —
 `get_idempotency_metrics()` when `settings.metrics_enabled`, a no-op otherwise — so a
 container rebuilt per test gets the instance the first one registered. Another backend, or a
 metric prefix, goes in with `@provide(override=True)` in a provider listed after it.
-`settings.enabled`, `settings.in_flight` and `settings.in_flight_lease_seconds` reach the
-coordinator: `enabled=False` makes it a pass-through. A settings object written before those
-fields existed is read as enabled, `"wait"` and 30 seconds.
+`settings.enabled`, `settings.in_flight`, `settings.in_flight_lease_seconds` and
+`settings.on_storage_error` reach the coordinator: `enabled=False` makes it a pass-through.
+A settings object written before those fields existed is read as enabled, `"wait"`, 30
+seconds and `"run"`.
 
 ## Rules that hold or break the code
 
@@ -333,13 +336,18 @@ fields existed is read as enabled, `"wait"` and 30 seconds.
    `idempotency_kit.core.decorators.aio.idempotent` and calls the function anyway — the
    operation stays available, unprotected. Pass `infra_param=` so a renamed attribute is one
    grep away, and alert on that warning.
-6. **`coordinate()` never raises for storage trouble.** A Redis failure on read is counted
-   as `storage_get_error` and treated as a miss; a failure on the reservation is
-   `storage_reserve_error` and the action runs unreserved; a failure on write is
-   `storage_save_error` and the fresh result is returned uncached. Availability over
-   exactly-once, deliberately. Repository methods called directly do raise — only the
-   coordinator and the decorator swallow. The one thing they do raise is
-   `IdempotencyInProgressError`, which is about the caller's request, not about storage.
+6. **`coordinate()` does not raise for storage trouble unless you ask it to.** A Redis
+   failure on read is counted as `storage_get_error` and treated as a miss; a failure on the
+   reservation is `storage_reserve_error` and the action runs unreserved; a failure on write
+   is `storage_save_error` and the fresh result is returned uncached. Availability over
+   exactly-once, deliberately, and the default. `on_storage_error="raise"` fails closed
+   instead: a failure on the reservation or the read, before the action runs, is still
+   counted and logged, and then raises `IdempotencyStorageError` — the repository's own,
+   or one wrapping a driver exception a custom repository let through — and the action does
+   not run; 503 in HTTP terms. A failure once the action has started (a renewal, the
+   write, the release) is swallowed in both modes, because the effect may have happened. A record the store returned
+   but nobody can read is not an outage in either mode (rule 7). Repository methods called
+   directly always raise.
 7. **A decode failure is a miss, every time.** If the adapter cannot decode a stored record,
    the coordinator logs and runs the action again. Changing the adapter or the DTO's shape
    while records are live re-executes the operation for every caller until those records
@@ -507,15 +515,19 @@ except IdempotencyKeyReuseError:
 ```
 
 ```python
-# WRONG — expecting the coordinator to tell you Redis is down
+# WRONG — expecting the default coordinator to tell you Redis is down
 try:
     result = await coordinator.coordinate("order.create", key, 3600, adapter, action, dto)
 except IdempotencyStorageError:
     ...                                            # never reached
 
-# RIGHT — the coordinator degrades to running the action; watch the metrics and the
-# logs for it, or call the repository yourself when you need the failure
-record = await repository.get("order.create", key)  # this one raises
+# RIGHT — ask for it where running unprotected is worse than refusing
+coordinator = AsyncIdempotencyCoordinator(repository, service, on_storage_error="raise")
+
+try:
+    return await coordinator.coordinate("payment.charge", key, 3600, adapter, action, dto)
+except IdempotencyStorageError:
+    raise HTTPException(503, detail="try again later")  # the action did not run
 ```
 
 ```python
@@ -546,15 +558,16 @@ All derive from `IdempotencyError`, which is exported alongside them.
 | `IdempotencyRecordExpiredError` | `(operation, key)` | `validate_record` was given an expired record. The coordinator raises it internally and turns it into a miss; through the repository or your own call to `validate_record` you meet it directly |
 | `IdempotencyInProgressError` | `(operation, key)` | another call with the same key is still running its action. `coordinate()` and the decorator raise it at once with `in_flight="raise"`, and after a whole lease of waiting with `"wait"`. Carries `.operation` and `.key` |
 | `IdempotencyKeyReuseError` | `(operation, key, stored_fingerprint, fingerprint)` | the record under the key was made for a different request. `coordinate()` and the decorator raise it before the action runs, from a completed record and from a pending one. Carries all four |
-| `IdempotencyStorageError` | `(message, operation=None, original_error=None)` | the backend failed. Carries `.operation` and `.original_error` |
+| `IdempotencyStorageError` | `(message, operation=None, original_error=None)` | the backend failed. `coordinate()` and the decorator raise it only with `on_storage_error="raise"`, before the action runs. Carries `.operation` and `.original_error` |
 | `IdempotencyValidationError` | `(message, errors=None)` | an identifier or a result failed validation. `coordinate()` and the decorator raise it for an invalid operation or key before the action runs. `.errors` holds the Pydantic error list when there is one |
 | `IdempotencyInvalidTTLError` | `(ttl_seconds, min_ttl, max_ttl)` | the TTL is outside the domain service's range. Carries all three |
 
 Through `coordinate()` and the decorator only `IdempotencyValidationError` for the
 identifiers, `IdempotencyInProgressError` and `IdempotencyKeyReuseError` reach the caller —
-all three are about the request, not about storage:
-the collision is resolved into a wait or the winner's result, and every other one is logged,
-counted and swallowed. The rest are the contract of the repository and the domain
+all three are about the request, not about storage — and `IdempotencyStorageError` when
+`on_storage_error="raise"` asks for it: the collision is resolved into a wait or the
+winner's result, and every other one is logged, counted and swallowed. The rest are the
+contract of the repository and the domain
 service, which is where you meet them if you drive those directly.
 
 ## Documentation map

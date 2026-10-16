@@ -5,10 +5,12 @@ from pydantic import BaseModel, Field
 from .core.constants import (
     DEFAULT_IN_FLIGHT_LEASE_SECONDS,
     DEFAULT_IN_FLIGHT_MODE,
+    DEFAULT_ON_STORAGE_ERROR,
     DEFAULT_TTL_MINUTES,
     MAX_TTL_SECONDS,
     MIN_TTL_SECONDS,
     InFlightMode,
+    StorageErrorMode,
 )
 
 
@@ -40,4 +42,11 @@ class BaseIdempotencySettings(BaseModel):
     in_flight_lease_seconds: int = Field(
         default=DEFAULT_IN_FLIGHT_LEASE_SECONDS,
         description="How long an in-flight reservation is held before it counts as abandoned (30 seconds)",
+    )
+    on_storage_error: StorageErrorMode = Field(
+        default=DEFAULT_ON_STORAGE_ERROR,
+        description=(
+            "What a call gets when the store fails before the action runs: run the action unprotected, "
+            "or raise IdempotencyStorageError"
+        ),
     )
