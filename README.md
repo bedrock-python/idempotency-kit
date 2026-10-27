@@ -1,6 +1,6 @@
 # idempotency-kit
 
-Production-ready idempotency library for async Python applications.
+Idempotency keys for async Python: one execution per key, and the stored result for every retry.
 
 [![PyPI](https://img.shields.io/pypi/v/idempotency-kit?color=blue)](https://pypi.org/project/idempotency-kit/)
 [![Python](https://img.shields.io/pypi/pyversions/idempotency-kit)](https://pypi.org/project/idempotency-kit/)
@@ -9,7 +9,7 @@ Production-ready idempotency library for async Python applications.
 [![codecov](https://codecov.io/gh/bedrock-python/idempotency-kit/graph/badge.svg)](https://codecov.io/gh/bedrock-python/idempotency-kit)
 [![Docs](https://img.shields.io/badge/docs-online-blue)](https://bedrock-python.github.io/idempotency-kit/)
 
-Ensure operations execute exactly once, even when called multiple times with the same idempotency key. Built for production microservices with graceful degradation, collision handling, and observability.
+Wrap a use case, a job or a message handler, and a repeated call with the same key gets the stored result instead of running again. A retry that arrives while the first call is still running waits for it, or gets a 409. Results live in Redis. It is a result cache with an in-flight reservation, not a distributed transaction: see [what it guarantees](https://bedrock-python.github.io/idempotency-kit/architecture/).
 
 > [!TIP]
 > **Building this with an AI assistant?** Hand it
@@ -22,17 +22,28 @@ Ensure operations execute exactly once, even when called multiple times with the
 
 ## Features
 
-- **Clean Architecture** — core domain separated from infrastructure
-- **Protocol-Based** — easy to swap storage backends (Redis, custom)
-- **Type-Safe** — full type hints with Pydantic validation
-- **Async First** — built for asyncio applications
-- **Graceful Degradation** — high availability over strict exactly-once
-- **In-flight Reservation** — a retry that arrives while the original is still running waits for its result or gets a 409; the action runs once
-- **Request Fingerprints** — name the parameters that identify a request, and a key reused for a different one is refused instead of replayed
-- **Observability** — built-in metrics (hits, misses, collisions, latency)
-- **Bulk Operations** — efficient `get_many`, `save_many`, `delete_many`
-- **Redis Cluster Compatible** — non-transactional pipelines
-- **Decorator Pattern** — `@async_idempotent` for zero-boilerplate integration
+- **Clean Architecture**: core domain separated from infrastructure
+- **Protocol-Based**: easy to swap storage backends (Redis, custom)
+- **Type-Safe**: full type hints with Pydantic validation
+- **Async First**: built for asyncio applications
+- **Fails open or closed**: by default a Redis outage runs the action unreserved; `on_storage_error="raise"` refuses instead
+- **In-flight Reservation**: a retry that arrives while the original is still running waits for its result or gets a 409; the action runs once
+- **Request Fingerprints**: name the parameters that identify a request, and a key reused for a different one is refused instead of replayed
+- **Observability**: built-in metrics (hits, misses, collisions, latency)
+- **Bulk Operations**: efficient `get_many`, `save_many`, `delete_many`
+- **Redis Cluster Compatible**: non-transactional pipelines
+- **Decorator Pattern**: `@async_idempotent` for zero-boilerplate integration
+
+## When to use it, and when not
+
+idempotency-kit fits an async Python 3.11+ service with Redis that wants idempotency at the use-case level, so the same guard covers an HTTP handler, a background job and a message consumer: retries that arrive while the first call is still running collapse into one execution, and a key reused for a different request is refused instead of replayed.
+
+Something else is probably the better fit when:
+
+- **You only need `Idempotency-Key` on a few HTTP endpoints.** A middleware that caches the response by header is less to wire. There are several for ASGI frameworks, and [django-idempotency-key](https://github.com/yoyowallet/django-idempotency-key) for Django.
+- **The write already has a natural key.** If the effect can be an `INSERT ... ON CONFLICT DO NOTHING` on a unique constraint, the database is your idempotency layer and a second store adds nothing.
+- **A repeat is unacceptable even when Redis is down.** The reservation is a lease, and by default a store outage runs the action unreserved. For a charge or an email that nothing downstream deduplicates, set `on_storage_error="raise"`, or keep the idempotency record in the same database transaction as the effect.
+- **Your code is synchronous, or your store is not Redis.** There is no sync API, and another store means implementing the repository protocol.
 
 ## Installation
 
@@ -69,7 +80,7 @@ class CreateOrderUseCase:
     ) -> OrderDTO:
         """Create order - idempotency handled automatically."""
         async with self._uow.transaction() as tx:
-            # Your business logic - no idempotency code needed!
+            # Business logic only; the decorator handles the key
             order = await tx.orders.create(dto.items, dto.total)
             await tx.outbox.create(OrderCreatedEvent(order_id=order.id))
             
@@ -98,7 +109,7 @@ Idempotency-Key: abc-123-def
 ```python
 cached = await repo.get("order.create", "abc-123-def")
 if cached:
-    return cached.result  # Return immediately ✅
+    return cached.result  # Return immediately
 ```
 
 ### 3. Server executes (if not cached)
@@ -113,21 +124,20 @@ return order
 
 If two requests arrive while the first is still executing:
 
-- First request: reserves the key → execute → write the result over the reservation ✅
-- Second request: finds the reservation → waits for the first result → return ✅ (or a 409 with `in_flight="raise"`)
+- First request: reserves the key, executes, writes the result over the reservation
+- Second request: finds the reservation, waits for the first result and returns it (or gets a 409 with `in_flight="raise"`)
 
 Both requests get the **same result**, and the business logic ran once.
 
 ## Use cases
 
-- **HTTP APIs** — ensure POST/PUT requests are idempotent
-- **Background Jobs** — prevent duplicate processing on retries
-- **Event Consumers** — handle duplicate events gracefully
-- **Message Queues** — at-most-once message processing
+- **HTTP APIs**: ensure POST/PUT requests are idempotent
+- **Background Jobs**: prevent duplicate processing on retries
+- **Event consumers and queues**: a redelivered message gets the stored result instead of a second run
 
 ## Documentation
 
-📚 **[Full Documentation](https://bedrock-python.github.io/idempotency-kit/)**
+**[Full documentation](https://bedrock-python.github.io/idempotency-kit/)**
 
 - [For AI agents](https://bedrock-python.github.io/idempotency-kit/agents/) — the whole library on one page
 - [Quick Start](https://bedrock-python.github.io/idempotency-kit/quickstart/) — get started in 5 minutes

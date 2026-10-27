@@ -1,21 +1,32 @@
 # idempotency-kit Documentation
 
-Production-ready idempotency library for async Python applications.
+Idempotency keys for async Python: one execution per key, and the stored result for every retry.
 
 ## What is idempotency-kit?
 
-**idempotency-kit** provides production-ready idempotency for microservices. It ensures that operations are executed exactly once, even when called multiple times with the same idempotency key.
+**idempotency-kit** makes a repeated call with the same idempotency key return the stored result instead of running again, and makes a retry that arrives while the first call is still running wait for it. It is a result cache with an in-flight reservation, not a distributed transaction: one execution per key while Redis is up, at-least-once when it is down unless you fail closed. See [Architecture](architecture.md) for the exact guarantee.
 
 ### Key Features
 
-- 🏗️ **Clean Architecture** - Core domain separated from infrastructure
-- 🔌 **Protocol-Based** - Easy to swap storage backends
-- ✅ **Type-Safe** - Full type hints with Pydantic validation
-- ⚡ **Async First** - Built for asyncio applications
-- 🛡️ **Production-Ready** - Graceful degradation and error handling
-- 📊 **Observable** - Built-in metrics support
-- 📦 **Bulk Operations** - Efficient batch processing
-- 🔗 **Redis Cluster** - Compatible with distributed Redis
+- **Clean Architecture**: core domain separated from infrastructure
+- **Protocol-Based**: storage backends are swappable
+- **Type-Safe**: full type hints with Pydantic validation
+- **Async First**: built for asyncio applications
+- **Fails open or closed**: by default a Redis outage runs the action unreserved; `on_storage_error="raise"` refuses instead
+- **Observable**: built-in metrics
+- **Bulk Operations**: batch get, save and delete
+- **Redis Cluster**: compatible with distributed Redis
+
+## When to use it, and when not
+
+idempotency-kit fits an async Python 3.11+ service with Redis that wants idempotency at the use-case level, so the same guard covers an HTTP handler, a background job and a message consumer: retries that arrive while the first call is still running collapse into one execution, and a key reused for a different request is refused instead of replayed.
+
+Something else is probably the better fit when:
+
+- **You only need `Idempotency-Key` on a few HTTP endpoints.** A middleware that caches the response by header is less to wire. There are several for ASGI frameworks, and [django-idempotency-key](https://github.com/yoyowallet/django-idempotency-key) for Django.
+- **The write already has a natural key.** If the effect can be an `INSERT ... ON CONFLICT DO NOTHING` on a unique constraint, the database is your idempotency layer and a second store adds nothing.
+- **A repeat is unacceptable even when Redis is down.** The reservation is a lease, and by default a store outage runs the action unreserved. For a charge or an email that nothing downstream deduplicates, set `on_storage_error="raise"`, or keep the idempotency record in the same database transaction as the effect.
+- **Your code is synchronous, or your store is not Redis.** There is no sync API, and another store means implementing the repository protocol.
 
 ## Installation
 
@@ -55,7 +66,7 @@ class CreateOrderUseCase:
     ) -> OrderDTO:
         """Create order - idempotency handled automatically."""
         async with self._uow.transaction() as tx:
-            # Your business logic - no idempotency code needed!
+            # Business logic only; the decorator handles the key
             order = await tx.orders.create(dto.items, dto.total)
             await tx.outbox.create(OrderCreatedEvent(order_id=order.id))
             
@@ -122,7 +133,7 @@ async def handle_event(event: Event):
 
 ### Message Queue Consumers
 
-Ensure at-most-once processing of messages.
+A redelivered message gets the stored result instead of a second run.
 
 ```python
 async def consume_message(message):
@@ -144,7 +155,7 @@ Idempotency-Key: abc-123-def
 ```python
 cached = await repo.get("order.create", "abc-123-def")
 if cached:
-    return cached.result  # Return immediately (idempotent ✅)
+    return cached.result  # Return immediately
 ```
 
 ### 3. Server Executes (if not cached)
@@ -159,8 +170,8 @@ return order
 
 If two requests arrive while the first is still executing:
 
-- First request: reserves the key → execute → write the result over the reservation ✅
-- Second request: finds the reservation → waits for the first result → return ✅ (or a 409 with `in_flight="raise"`)
+- First request: reserves the key, executes, writes the result over the reservation
+- Second request: finds the reservation, waits for the first result and returns it (or gets a 409 with `in_flight="raise"`)
 
 Both requests get the **same result**, and the business logic ran once.
 
@@ -169,7 +180,7 @@ Both requests get the **same result**, and the business logic ran once.
 ### Without idempotency-kit
 
 ```python
-# ❌ Duplicate requests create duplicate orders
+# Duplicate requests create duplicate orders
 @app.post("/orders")
 async def create_order(dto):
     order = await db.save(Order(**dto))  # Duplicate on retry!
@@ -184,7 +195,7 @@ async def create_order(dto):
 ### With idempotency-kit
 
 ```python
-# ✅ Duplicate requests return same result
+# Duplicate requests return the same result
 @app.post("/orders")
 async def create_order(dto, idempotency_key: str | None = None):
     result = await use_case.execute(dto, idempotency_key)
@@ -194,7 +205,7 @@ async def create_order(dto, idempotency_key: str | None = None):
 **Benefits:**
 - Automatic deduplication
 - Handles concurrent requests
-- Production-ready error handling
+- Explicit behaviour when Redis is down
 - Observable with metrics
 
 ## Community
